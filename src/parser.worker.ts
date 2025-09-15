@@ -1,0 +1,148 @@
+import type { FlamegraphNode, HeatmapData } from './types';
+
+// This file runs in a separate thread and handles heavy parsing.
+
+function parsePerfScript(text: string) {
+    const lines = text.split('\n');
+    const samples: { stack: string[], time: number }[] = [];
+    let currentSample: { stack: string[], time: number } | null = null;
+    let foundSampleHeader = false;
+
+    for (const line of lines) {
+        const match = line.match(/^\S+\s+\d+\s+\[\d+\]\s+([\d.]+):/);
+        if (match) {
+            foundSampleHeader = true;
+            if (currentSample) {
+                samples.push(currentSample);
+            }
+            currentSample = { stack: [], time: parseFloat(match[1]) };
+        } else if (currentSample && line.trim()) {
+            const frame = line.trim().split(' ')[1];
+            if (frame) {
+                let cleanFrame = frame.split('+')[0];
+                if (cleanFrame.startsWith('L')) {
+                    cleanFrame = cleanFrame.substring(1).replace(/;/g, '.');
+                }
+                currentSample.stack.unshift(cleanFrame);
+            }
+        }
+    }
+    if (currentSample) {
+        samples.push(currentSample);
+    }
+
+    if (!foundSampleHeader) {
+        throw new Error("Invalid file format: No sample headers found. Perf script output should contain lines with timestamps (e.g., 'command 1234 123.456:').");
+    }
+
+    if (samples.length === 0) {
+        throw new Error("No complete samples could be parsed. Check that the file is not empty or truncated.");
+    }
+
+    return samples;
+}
+
+function buildFlamegraphData(samples: { stack: string[], time: number }[]): FlamegraphNode {
+    const root: FlamegraphNode = { name: 'root', value: 0, children: [] };
+
+    for (const sample of samples) {
+        let currentNode: FlamegraphNode = root;
+        root.value++; // Increment root for total samples
+
+        for (let i = 0; i < sample.stack.length; i++) {
+            const frameName = sample.stack[i];
+            let childNode = currentNode.children.find((c) => c.name === frameName);
+
+            if (!childNode) {
+                childNode = { name: frameName, value: 0, children: [] };
+                currentNode.children.push(childNode);
+            }
+
+            // Only increment the value of the leaf node for this sample
+            if (i === sample.stack.length - 1) {
+                childNode.value++;
+            }
+
+            currentNode = childNode;
+        }
+    }
+
+    // Post-process to remove nodes with 0 value that are not leaves.
+    // This can happen if a frame is always a parent but never a leaf.
+    function removeZeroValueNodes(node: FlamegraphNode) {
+        node.children = node.children.filter(child => {
+            removeZeroValueNodes(child);
+            // Keep the node if it has children or if its value is greater than 0
+            return child.children.length > 0 || child.value > 0;
+        });
+    }
+
+    // It's better to let d3.sum handle the values of the parents
+    // so we reset all but the leaf values to 0.
+    function resetParentValues(node: FlamegraphNode) {
+        if (node.children.length > 0) {
+            node.value = 0;
+        }
+        for (const child of node.children) {
+            resetParentValues(child);
+        }
+    }
+    resetParentValues(root);
+    root.value = 0; // Root value will be summed up by d3
+
+    return root;
+}
+
+function buildHeatmapData(samples: { stack: string[], time: number }[]): HeatmapData {
+    if (samples.length === 0) {
+        return { data: [], maxTime: 0, maxCount: 0 };
+    }
+
+    const firstTime = samples[0].time;
+    const maxTime = samples[samples.length - 1].time - firstTime;
+
+    const numSeconds = Math.ceil(maxTime);
+    const buckets: number[][] = Array.from({ length: numSeconds }, () => Array(10).fill(0));
+    let maxCount = 0;
+
+    for (const sample of samples) {
+        const relativeTime = sample.time - firstTime;
+        const second = Math.floor(relativeTime);
+        const interval = Math.floor((relativeTime - second) * 10);
+
+        if (second < numSeconds && interval < 10) {
+            buckets[second][interval]++;
+            if (buckets[second][interval] > maxCount) {
+                maxCount = buckets[second][interval];
+            }
+        }
+    }
+
+    const heatmapData: { second: number, interval: number, count: number }[] = [];
+    for (let i = 0; i < numSeconds; i++) {
+        for (let j = 0; j < 10; j++) {
+            if (buckets[i][j] > 0) {
+                heatmapData.push({ second: i, interval: j, count: buckets[i][j] });
+            }
+        }
+    }
+
+    return { data: heatmapData, maxTime: numSeconds, maxCount };
+}
+
+self.onmessage = (e: MessageEvent<{ fileContent: string }>)=> {
+    const { fileContent } = e.data;
+    try {
+        const samples = parsePerfScript(fileContent);
+        const flamegraphData = buildFlamegraphData(samples);
+        const heatmapData = buildHeatmapData(samples);
+        self.postMessage({ status: 'success', flamegraphData, heatmapData });
+    } catch (error) {
+        // Log the full error for debugging, but only send the message to the main thread
+        console.error("Error parsing perf script:", error);
+        self.postMessage({ status: 'error', message: (error as Error).message });
+    }
+};
+
+// Export {} to make it a module.
+export {};

@@ -1,0 +1,295 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import * as d3 from 'd3';
+import { Tooltip } from './Tooltip';
+import type { FlamegraphNode } from '../types';
+
+type FlamegraphHierarchyNode = d3.HierarchyRectangularNode<FlamegraphNode>;
+
+interface FlameGraphProps {
+    data: FlamegraphNode;
+}
+
+export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
+    const svgRef = useRef<SVGSVGElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [tooltip, setTooltip] = useState<{ content: string; position: { x: number; y: number } } | null>(null);
+    const tooltipTimer = useRef<number | null>(null);
+    const truncatedNames = useRef(new Map<FlamegraphNode, string>());
+    const [generation, setGeneration] = useState(0);
+    const rootRef = useRef<FlamegraphHierarchyNode | null>(null);
+    const [collapsedNodes, setCollapsedNodes] = useState<Map<string, boolean>>(new Map());
+    const [prunedNodes, setPrunedNodes] = useState<Set<string>>(new Set());
+    const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: FlamegraphHierarchyNode } | null>(null);
+
+    const colorScale = d3.scaleOrdinal(d3.schemePaired);
+
+    const handleMouseOver = useCallback((event: MouseEvent, d: d3.HierarchyRectangularNode<FlamegraphNode>) => {
+        if (tooltipTimer.current) {
+            clearTimeout(tooltipTimer.current);
+        }
+
+        const descendantCount = d.descendants().length - 1; // Count of all descendants
+        const stackSize = d.depth; // Assuming stack size is depth
+
+        const fullContent = `<strong>${d.data.name}</strong><br>${d.value.toLocaleString()} samples<br>Descendants: ${descendantCount}<br>Stack Size: ${stackSize}`;
+
+        setTooltip({
+            content: fullContent,
+            position: { x: event.pageX, y: event.pageY - 10 }
+        });
+
+        tooltipTimer.current = window.setTimeout(() => {
+            const fullContent = `<strong>${d.data.name}</strong><br>${d.data.value.toLocaleString()} samples`;
+            setTooltip(prev => prev ? { ...prev, content: fullContent } : null);
+        }, 1000);
+    }, []);
+
+    const handleMouseOut = () => {
+        if (tooltipTimer.current) {
+            clearTimeout(tooltipTimer.current);
+        }
+        setTooltip(null);
+    };
+
+    const handleClick = (event: React.MouseEvent, d: FlamegraphHierarchyNode) => {
+        event.stopPropagation();
+        setCollapsedNodes(prev => {
+            const newMap = new Map(prev);
+            const currentState = newMap.get(d.data.name) || false; // Use d.data.name
+            newMap.set(d.data.name, !currentState);
+            return newMap;
+        });
+
+        setGeneration(g => {
+            return g + 1;
+        });
+    };
+
+    const handleContextMenu = (event: React.MouseEvent, d: FlamegraphHierarchyNode) => {
+        event.preventDefault(); // Prevent default context menu
+
+        if (!containerRef.current) return;
+
+        const containerRect = containerRef.current.getBoundingClientRect();
+        const x = event.pageX - containerRect.left;
+        const y = event.pageY - containerRect.top;
+
+        const menuHeight = 96; // Hardcoded height for now (h-24 = 96px)
+        const adjustedY = y + menuHeight > containerRect.height ? y - menuHeight : y;
+
+        const newContextMenu = {
+            x: x,
+            y: adjustedY,
+            node: d,
+        };
+        setContextMenu(newContextMenu);
+        
+    };
+
+    const handleClearPruned = () => {
+        setPrunedNodes(new Set());
+        setGeneration(g => g + 1);
+    };
+
+    const handlePruneNode = () => {
+        if (contextMenu) {
+            setPrunedNodes(prev => {
+                const newSet = new Set(prev);
+                contextMenu.node.each(node => {
+                    if (node.data._path) {
+                        newSet.add(node.data._path);
+                    }
+                });
+                return newSet;
+            });
+            setContextMenu(null); // Hide context menu
+            setGeneration(g => g + 1);
+        }
+    };
+
+    useEffect(() => {
+        if (data) {
+            rootRef.current = d3.hierarchy(data, d => {
+                if (Array.isArray(d.children)) {
+                    return d.children.filter((child): child is FlamegraphNode =>
+                        child !== null && child !== undefined &&
+                        typeof child === 'object' &&
+                        'name' in child && 'value' in child && 'children' in child
+                    );
+                }
+                return undefined;
+            }) as FlamegraphHierarchyNode;
+            
+            rootRef.current.sum(d => d.value ?? 0);
+            rootRef.current.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+
+            // Assign a unique path to each node for stable identification
+            rootRef.current.each((node: FlamegraphHierarchyNode) => {
+                if (node.data) {
+                    node.data._path = (node.parent ? node.parent.data._path + '/' : '') + node.data.name;
+                }
+            });
+        }
+    }, [data]);
+
+    useEffect(() => {
+        if (!rootRef.current || !svgRef.current || !containerRef.current) return;
+
+        const width = containerRef.current.offsetWidth;
+        const height = containerRef.current.offsetHeight;
+
+        const svg = d3.select(svgRef.current);
+        svg.selectAll("*").remove();
+
+        svg.attr('viewBox', [0, 0, width, height].join(' '));
+
+        const root = rootRef.current.copy();
+
+        // Apply collapsed and pruned states
+        root.each(node => {
+            if (node.data) {
+                node.data._collapsed = collapsedNodes.get(node.data.name) ?? false;
+                if (node.data._path) {
+                    node.data._pruned = prunedNodes.has(node.data._path);
+                }
+            }
+        });
+        
+        root.each(node => {
+            if (node.data?._pruned) {
+                node.each(descendant => {
+                    if (descendant.data) {
+                        descendant.data._pruned = true;
+                    }
+                });
+            }
+        });
+
+        root.eachAfter(node => {
+            let sum = (node.data && !node.data._pruned) ? (node.data.value ?? 0) : 0;
+            if (node.children) {
+                for (const child of node.children) {
+                    sum += child.value;
+                }
+            }
+            node.value = sum;
+        });
+
+        const partition = d3.partition<FlamegraphNode>().size([width, height]).padding(1);
+        partition(root);
+
+        const visibleNodes = root.descendants().filter(d => {
+            if (d.value <= 0) return false;
+            if (d.data._pruned) return false;
+            let current = d.parent;
+            while (current) {
+                if (current.data._collapsed) return false;
+                current = current.parent;
+            }
+            return true;
+        });
+
+        const max_y1 = d3.max(visibleNodes, d => d.y1) ?? height;
+        const yScale = d3.scaleLinear().domain([0, max_y1]).range([0, height]);
+
+        const cell = svg
+            .selectAll("g")
+            .data(visibleNodes)
+            .join("g")
+            .attr("transform", d => `translate(${d.x0},${height - yScale(d.y1)})`);
+
+        cell.append("rect")
+            .attr("width", d => d.x1 - d.x0)
+            .attr("height", d => {
+                const h = yScale(d.y1) - yScale(d.y0);
+                return h < 0 ? 0 : h;
+            })
+            .attr("fill", d => {
+                if (d.data._collapsed) return '#aaa';
+                return colorScale(d.data.name);
+            })
+            .attr("class", "flamegraph-rect")
+            .on("mouseover", (e, d) => handleMouseOver(e, d as d3.HierarchyRectangularNode<FlamegraphNode>))
+            .on("mouseout", handleMouseOut)
+            .on("click", (e, d) => handleClick(e, d as FlamegraphHierarchyNode))
+            .on("contextmenu", (e, d) => handleContextMenu(e, d as FlamegraphHierarchyNode));
+
+        cell.append("text")
+            .attr("x", 4)
+            .attr("y", d => {
+                const h = yScale(d.y1) - yScale(d.y0);
+                return (h < 0 ? 0 : h) - 4;
+            })
+            .attr("fill", "white")
+            .style("font-size", "12px")
+            .style("pointer-events", "none")
+            .each(function(d) {
+                const node = d3.select(this);
+                const width = (d.x1 ?? 0) - (d.x0 ?? 0);
+                if (width < 20) {
+                    node.text("");
+                    return;
+                }
+                
+                const tempText = svg.append("text")
+                    .attr("font-size", "12px")
+                    .text(d.data.name);
+                
+                const textNode = tempText.node();
+                if (!textNode) {
+                    node.text(d.data.name);
+                    tempText.remove();
+                    return;
+                }
+
+                const textLength = tempText.node()!.getComputedTextLength();
+                let text = d.data.name;
+                if (textLength > width - 8) {
+                    const avgCharWidth = textLength / text.length;
+                    const maxChars = Math.floor((width - 8) / avgCharWidth);
+                    if (maxChars > 3) {
+                        text = text.substring(0, maxChars - 3) + "...";
+                    } else {
+                        text = "";
+                    }
+                }
+                node.text(text);
+                truncatedNames.current.set(d.data, text);
+                tempText.remove();
+            });
+
+    }, [generation, colorScale, handleMouseOver, collapsedNodes, prunedNodes]);
+
+    return (
+        <div ref={containerRef} className="w-full h-full relative">
+            <button
+                onClick={() => setCollapsedNodes(new Map())}
+                className="absolute top-2 right-2 bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-sm"
+            >
+                Expand All
+            </button>
+            <button
+                onClick={handleClearPruned}
+                className="absolute top-2 right-28 bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded text-sm"
+            >
+                Clear Pruned
+            </button>
+            <svg ref={svgRef} width="100%" height="100%"></svg>
+            {tooltip && <Tooltip content={tooltip.content} position={tooltip.position} />}
+            {contextMenu && (
+                <div
+                    className="absolute bg-purple-500 border-4 border-yellow-400 shadow-lg rounded py-1 z-[9999] w-48 h-24 flex items-center justify-center"
+                    style={{ top: contextMenu.y, left: contextMenu.x }}
+                    onMouseLeave={() => setContextMenu(null)} // Hide context menu when mouse leaves
+                >
+                    <button
+                        onClick={handlePruneNode}
+                        className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600"
+                    >
+                        Prune Node
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+};
