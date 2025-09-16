@@ -4,18 +4,26 @@ import type { FlamegraphNode, HeatmapData } from './types';
 
 function parsePerfScript(text: string) {
     const lines = text.split('\n');
-    const samples: { stack: string[], time: number }[] = [];
-    let currentSample: { stack: string[], time: number } | null = null;
+    const samples: { stack: string[], time: number, process: string, cpuCost: number }[] = [];
+    let currentSample: { stack: string[], time: number, process: string, cpuCost: number } | null = null;
     let foundSampleHeader = false;
+    const lastCpuCostByCpu = new Map<number, number>();
 
     for (const line of lines) {
-        const match = line.match(/^\S+\s+\d+\s+\[\d+\]\s+([\d.]+):/);
+        const match = line.match(/^(\S+)\s+(\d+)\s+\[(\d+)\]\s+([\d.]+):/);
         if (match) {
             foundSampleHeader = true;
             if (currentSample) {
                 samples.push(currentSample);
             }
-            currentSample = { stack: [], time: parseFloat(match[1]) };
+            const processName = match[1];
+            const cumulativeCpuCost = parseInt(match[2]);
+            const cpu = parseInt(match[3]);
+            const lastCpuCost = lastCpuCostByCpu.get(cpu) || 0;
+            const intervalCpuCost = cumulativeCpuCost - lastCpuCost;
+            lastCpuCostByCpu.set(cpu, cumulativeCpuCost);
+
+            currentSample = { stack: [], time: parseFloat(match[4]), process: processName, cpuCost: Math.max(0, intervalCpuCost) };
         } else if (currentSample && line.trim()) {
             const frame = line.trim().split(' ')[1];
             if (frame) {
@@ -42,8 +50,8 @@ function parsePerfScript(text: string) {
     return samples;
 }
 
-function buildFlamegraphData(samples: { stack: string[], time: number }[]): FlamegraphNode {
-    const root: FlamegraphNode = { name: 'root', value: 0, children: [] };
+function buildFlamegraphData(samples: { stack: string[], time: number, process: string, cpuCost: number }[]): FlamegraphNode {
+    const root: FlamegraphNode = { name: 'root', value: 0, children: [], samples: [] };
     if (samples.length > 0) {
         root.startTime = samples[0].time;
         root.endTime = samples[samples.length - 1].time;
@@ -53,7 +61,23 @@ function buildFlamegraphData(samples: { stack: string[], time: number }[]): Flam
         let currentNode: FlamegraphNode = root;
 
         for (let i = 0; i < sample.stack.length; i++) {
-            const frameName = sample.stack[i];
+            let frameName = sample.stack[i];
+            let processName = sample.process;
+
+            if (frameName === '[unknown]') {
+                let unknownCount = 1;
+                while (i + 1 < sample.stack.length && sample.stack[i + 1] === '[unknown]') {
+                    unknownCount++;
+                    i++;
+                }
+
+                if (unknownCount > 1) {
+                    frameName = `${unknownCount} x [unknown] (${processName})`
+                } else {
+                    frameName = `[unknown] (${processName})`
+                }
+            }
+
             let childNode = currentNode.children.find((c) => c.name === frameName);
 
             if (!childNode) {
@@ -61,8 +85,10 @@ function buildFlamegraphData(samples: { stack: string[], time: number }[]): Flam
                     name: frameName,
                     value: 0,
                     children: [],
+                    process: processName,
                     startTime: sample.time,
-                    endTime: sample.time
+                    endTime: sample.time,
+                    samples: []
                 };
                 currentNode.children.push(childNode);
             } else {
@@ -76,6 +102,8 @@ function buildFlamegraphData(samples: { stack: string[], time: number }[]): Flam
 
             if (i === sample.stack.length - 1) {
                 childNode.value++;
+                childNode.samples = childNode.samples || [];
+                childNode.samples.push({ time: sample.time, cpuCost: sample.cpuCost });
             }
 
             currentNode = childNode;
@@ -103,7 +131,7 @@ function buildFlamegraphData(samples: { stack: string[], time: number }[]): Flam
     return root;
 }
 
-function buildHeatmapData(samples: { stack: string[], time: number }[]): HeatmapData {
+function buildHeatmapData(samples: { stack: string[], time: number, process: string }[]): HeatmapData {
     if (samples.length === 0) {
         return { data: [], maxTime: 0, maxCount: 0 };
     }
@@ -145,7 +173,7 @@ self.onmessage = (e: MessageEvent<{ fileContent: string }>)=> {
     try {
         const samples = parsePerfScript(fileContent);
         const flamegraphData = buildFlamegraphData(samples);
-        const heatmapData = buildHeatmapData(samples);
+        const heatmapData = buildHeatmapData(samples as any);
         self.postMessage({ status: 'success', flamegraphData, heatmapData });
     } catch (error) {
         // Log the full error for debugging, but only send the message to the main thread

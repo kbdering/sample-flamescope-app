@@ -20,6 +20,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
     const [collapsedNodes, setCollapsedNodes] = useState<Map<string, boolean>>(new Map());
     const [prunedNodes, setPrunedNodes] = useState<Set<string>>(new Set());
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: FlamegraphHierarchyNode } | null>(null);
+    const [colorByCpuCost, setColorByCpuCost] = useState(false);
 
     const colorScale = d3.scaleOrdinal(d3.schemePaired);
 
@@ -30,8 +31,11 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
 
         const descendantCount = d.descendants().length - 1; // Count of all descendants
         const stackSize = d.depth; // Assuming stack size is depth
+        const processInfo = d.data.process ? `<br>Process: ${d.data.process}` : '';
+        const maxCpu = d.data.maxCpuCost ? `<br>Max CPU: ${d.data.maxCpuCost.toLocaleString()}` : '';
+        const avgCpu = d.data.totalCpuCost && d.data.value > 0 ? `<br>Avg CPU: ${(d.data.totalCpuCost / d.data.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
 
-        const fullContent = `<strong>${d.data.name}</strong><br>${d.value.toLocaleString()} samples<br>Descendants: ${descendantCount}<br>Stack Size: ${stackSize}`;
+        const fullContent = `<strong>${d.data.name}</strong><br>${d.value.toLocaleString()} samples${processInfo}<br>Descendants: ${descendantCount}<br>Stack Size: ${stackSize}${maxCpu}${avgCpu}`;
 
         setTooltip({
             content: fullContent,
@@ -39,8 +43,8 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         });
 
         tooltipTimer.current = window.setTimeout(() => {
-            const fullContent = `<strong>${d.data.name}</strong><br>${d.data.value.toLocaleString()} samples`;
-            setTooltip(prev => prev ? { ...prev, content: fullContent } : null);
+            const shortContent = `<strong>${d.data.name}</strong><br>${d.data.value.toLocaleString()} samples${processInfo}`;
+            setTooltip(prev => prev ? { ...prev, content: shortContent } : null);
         }, 1000);
     }, []);
 
@@ -192,6 +196,9 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         const max_y1 = d3.max(visibleNodes, d => d.y1) ?? height;
         const yScale = d3.scaleLinear().domain([0, max_y1]).range([0, height]);
 
+        const maxCpuCost = d3.max(visibleNodes, d => d.data.maxCpuCost) || 0;
+        const cpuColorScale = d3.scaleSequential(d3.interpolateReds).domain([0, maxCpuCost]);
+
         const cell = svg
             .selectAll("g")
             .data(visibleNodes)
@@ -206,6 +213,9 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             })
             .attr("fill", d => {
                 if (d.data._collapsed) return '#aaa';
+                if (colorByCpuCost) {
+                    return cpuColorScale(d.data.maxCpuCost || 0);
+                }
                 return colorScale(d.data.name);
             })
             .attr("class", "flamegraph-rect")
@@ -258,22 +268,28 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
                 tempText.remove();
             });
 
-    }, [generation, colorScale, handleMouseOver, collapsedNodes, prunedNodes]);
+    }, [generation, colorScale, handleMouseOver, collapsedNodes, prunedNodes, colorByCpuCost]);
 
     return (
         <div ref={containerRef} className="w-full h-full relative">
-            <button
-                onClick={() => setCollapsedNodes(new Map())}
-                className="absolute top-2 right-2 bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-sm"
-            >
-                Expand All
-            </button>
-            <button
-                onClick={handleClearPruned}
-                className="absolute top-2 right-28 bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded text-sm"
-            >
-                Clear Pruned
-            </button>
+            <div className="absolute top-2 right-2 flex items-center space-x-2">
+                <label className="flex items-center space-x-1 text-white text-sm">
+                    <input type="checkbox" checked={colorByCpuCost} onChange={() => setColorByCpuCost(!colorByCpuCost)} className="form-checkbox h-4 w-4 text-indigo-600 bg-gray-800 border-gray-600 rounded focus:ring-indigo-500" />
+                    <span>Color by CPU Cost</span>
+                </label>
+                <button
+                    onClick={() => setCollapsedNodes(new Map())}
+                    className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-sm"
+                >
+                    Expand All
+                </button>
+                <button
+                    onClick={handleClearPruned}
+                    className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded text-sm"
+                >
+                    Clear Pruned
+                </button>
+            </div>
             <svg ref={svgRef} width="100%" height="100%"></svg>
             {tooltip && <Tooltip content={tooltip.content} position={tooltip.position} />}
             {contextMenu && (

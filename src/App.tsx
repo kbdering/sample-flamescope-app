@@ -22,8 +22,13 @@ function App() {
             setIsLoading(false);
             const { status, flamegraphData, heatmapData, message } = e.data;
             if (status === 'success') {
+                const assignPaths = (node: FlamegraphNode, parentPath: string = '') => {
+                    node._path = parentPath + '/' + node.name;
+                    (node.children || []).forEach(child => assignPaths(child, node._path));
+                };
+                assignPaths(flamegraphData);
+
                 setOriginalData({ flamegraph: flamegraphData, heatmap: heatmapData });
-                setFilteredData({ flamegraph: flamegraphData, heatmap: heatmapData });
                 setError(null);
             } else {
                 setError(message);
@@ -39,59 +44,60 @@ function App() {
     }, []);
 
     const filterFlamegraph = (node: FlamegraphNode, minTime: number, maxTime: number): FlamegraphNode | null => {
-        const nodeStartTime = node.startTime ?? -Infinity;
-        const nodeEndTime = node.endTime ?? Infinity;
-    
-        if (nodeEndTime < minTime || nodeStartTime > maxTime) {
+        const filteredChildren = (node.children || []).map(child => filterFlamegraph(child, minTime, maxTime)).filter(Boolean) as FlamegraphNode[];
+
+        const samplesInNode = (node.samples || []).filter(s => s.time >= minTime && s.time <= maxTime);
+
+        const value = samplesInNode.length;
+
+        if (value === 0 && filteredChildren.length === 0) {
             return null;
         }
-    
-        const filteredChildren: FlamegraphNode[] = [];
-        if (node.children) {
-            for (const child of node.children) {
-                const filteredChild = filterFlamegraph(child, minTime, maxTime);
-                if (filteredChild) {
-                    filteredChildren.push(filteredChild);
-                }
-            }
-        }
-    
-        const isLeaf = !node.children || node.children.length === 0;
-        if (isLeaf && node.value > 0 && nodeStartTime >= minTime && nodeEndTime <= maxTime) {
-            return { ...node, children: [] };
-        }
-    
-        if (filteredChildren.length > 0) {
-            return { ...node, children: filteredChildren };
-        }
 
-        // Keep parent if it partially overlaps, even if no children match perfectly
-        if (!isLeaf && (nodeStartTime < maxTime && nodeEndTime > minTime)) {
-            return { ...node, children: filteredChildren };
-        }
+        const totalCpuCostFromChildren = filteredChildren.reduce((sum, child) => sum + (child.totalCpuCost || 0), 0);
+        const totalCpuCostFromNode = samplesInNode.reduce((sum, s) => sum + s.cpuCost, 0);
+        const totalCpuCost = totalCpuCostFromChildren + totalCpuCostFromNode;
 
-        return null;
+        const maxCpuCostFromChildren = Math.max(0, ...filteredChildren.map(child => child.maxCpuCost || 0));
+        const maxCpuCostFromNode = Math.max(0, ...samplesInNode.map(s => s.cpuCost));
+        const maxCpuCost = Math.max(maxCpuCostFromChildren, maxCpuCostFromNode);
+
+        return {
+            ...node,
+            children: filteredChildren,
+            value: value, // Node's own value, not aggregated
+            samples: samplesInNode,
+            totalCpuCost: totalCpuCost, // Aggregated for tooltip
+            maxCpuCost: maxCpuCost,     // Aggregated for tooltip
+        };
     };
 
     React.useEffect(() => {
         if (!originalData) return;
+
+        let graphData = { name: 'root', value: 0, children: [] };
 
         if (timeRange) {
             const firstTime = originalData.heatmap.firstTime ?? 0;
             const min = firstTime + timeRange.min;
             const max = firstTime + timeRange.max;
             
-            const newFlamegraph = filterFlamegraph(originalData.flamegraph, min, max);
-
-            if (newFlamegraph) {
-                setFilteredData({ ...originalData, flamegraph: newFlamegraph });
-            } else {
-                // Show an empty root if nothing matches
-                setFilteredData({ ...originalData, flamegraph: { name: 'root', value: 0, children: [] } });
+            const filtered = filterFlamegraph(originalData.flamegraph, min, max);
+            if (filtered) {
+                graphData = filtered;
             }
+            
         } else {
-            setFilteredData(originalData);
+            const fullRangeMin = originalData.flamegraph.startTime || 0;
+            const fullRangeMax = originalData.flamegraph.endTime || Infinity;
+            const fullGraph = filterFlamegraph(originalData.flamegraph, fullRangeMin, fullRangeMax);
+            if (fullGraph) {
+                graphData = fullGraph;
+            }
         }
+
+        setFilteredData({ ...originalData, flamegraph: graphData });
+
     }, [timeRange, originalData]);
 
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -162,7 +168,7 @@ function App() {
                         <button onClick={() => setView('heatmap')} className={`px-4 py-2 text-sm font-medium rounded-md ${view === 'heatmap' ? 'bg-indigo-600 text-white' : 'text-gray-300 hover:bg-gray-700'}`}>Heatmap</button>
                     </div>
                     <div className="flex-grow w-full h-full overflow-hidden">
-                        {view === 'flamegraph' ? <FlameGraph data={filteredData.flamegraph} /> : <Heatmap data={originalData.heatmap} timeRange={timeRange} onTimeRangeSelect={setTimeRange} />}
+                        {view === 'flamegraph' ? <FlameGraph data={filteredData.flamegraph} /> : <Heatmap data={originalData!.heatmap} timeRange={timeRange} onTimeRangeSelect={setTimeRange} />}
                     </div>
                 </div>
              );
@@ -281,4 +287,3 @@ function App() {
 }
 
 export default App;
-
