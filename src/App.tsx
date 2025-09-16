@@ -6,7 +6,9 @@ import type { FlamegraphNode, HeatmapData } from './types';
 type View = 'flamegraph' | 'heatmap';
 
 function App() {
-    const [data, setData] = React.useState<{ flamegraph: FlamegraphNode, heatmap: HeatmapData } | null>(null);
+    const [originalData, setOriginalData] = React.useState<{ flamegraph: FlamegraphNode, heatmap: HeatmapData } | null>(null);
+    const [filteredData, setFilteredData] = React.useState<{ flamegraph: FlamegraphNode, heatmap: HeatmapData } | null>(null);
+    const [timeRange, setTimeRange] = React.useState<{ min: number, max: number } | null>(null);
     const [error, setError] = React.useState<string | null>(null);
     const [isLoading, setIsLoading] = React.useState(false);
     const [view, setView] = React.useState<View>('flamegraph');
@@ -20,11 +22,13 @@ function App() {
             setIsLoading(false);
             const { status, flamegraphData, heatmapData, message } = e.data;
             if (status === 'success') {
-                setData({ flamegraph: flamegraphData, heatmap: heatmapData });
+                setOriginalData({ flamegraph: flamegraphData, heatmap: heatmapData });
+                setFilteredData({ flamegraph: flamegraphData, heatmap: heatmapData });
                 setError(null);
             } else {
                 setError(message);
-                setData(null);
+                setOriginalData(null);
+                setFilteredData(null);
                 console.error("Parsing error:", message);
             }
         };
@@ -34,12 +38,70 @@ function App() {
         };
     }, []);
 
+    const filterFlamegraph = (node: FlamegraphNode, minTime: number, maxTime: number): FlamegraphNode | null => {
+        const nodeStartTime = node.startTime ?? -Infinity;
+        const nodeEndTime = node.endTime ?? Infinity;
+    
+        if (nodeEndTime < minTime || nodeStartTime > maxTime) {
+            return null;
+        }
+    
+        const filteredChildren: FlamegraphNode[] = [];
+        if (node.children) {
+            for (const child of node.children) {
+                const filteredChild = filterFlamegraph(child, minTime, maxTime);
+                if (filteredChild) {
+                    filteredChildren.push(filteredChild);
+                }
+            }
+        }
+    
+        const isLeaf = !node.children || node.children.length === 0;
+        if (isLeaf && node.value > 0 && nodeStartTime >= minTime && nodeEndTime <= maxTime) {
+            return { ...node, children: [] };
+        }
+    
+        if (filteredChildren.length > 0) {
+            return { ...node, children: filteredChildren };
+        }
+
+        // Keep parent if it partially overlaps, even if no children match perfectly
+        if (!isLeaf && (nodeStartTime < maxTime && nodeEndTime > minTime)) {
+            return { ...node, children: filteredChildren };
+        }
+
+        return null;
+    };
+
+    React.useEffect(() => {
+        if (!originalData) return;
+
+        if (timeRange) {
+            const firstTime = originalData.heatmap.firstTime ?? 0;
+            const min = firstTime + timeRange.min;
+            const max = firstTime + timeRange.max;
+            
+            const newFlamegraph = filterFlamegraph(originalData.flamegraph, min, max);
+
+            if (newFlamegraph) {
+                setFilteredData({ ...originalData, flamegraph: newFlamegraph });
+            } else {
+                // Show an empty root if nothing matches
+                setFilteredData({ ...originalData, flamegraph: { name: 'root', value: 0, children: [] } });
+            }
+        } else {
+            setFilteredData(originalData);
+        }
+    }, [timeRange, originalData]);
+
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
         if (file) {
             setIsLoading(true);
             setError(null);
-            setData(null);
+            setOriginalData(null);
+            setFilteredData(null);
+            setTimeRange(null);
             const reader = new FileReader();
             reader.onload = (e) => {
                 workerRef.current?.postMessage({ fileContent: e.target?.result });
@@ -65,6 +127,9 @@ function App() {
     const handleDragLeave = (e: React.DragEvent<HTMLElement>) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('border-indigo-400', 'bg-gray-800/50'); };
 
     const MainContent = () => {
+        const [isGenerateHelpOpen, setIsGenerateHelpOpen] = React.useState(true);
+        const [isProfilingHelpOpen, setIsProfilingHelpOpen] = React.useState(false);
+
         if (isLoading) {
             return (
                 <div className="flex flex-col items-center justify-center h-full text-gray-400">
@@ -89,7 +154,7 @@ function App() {
             );
         }
 
-        if (data) {
+        if (filteredData) {
              return (
                  <div className="w-full h-full flex flex-col">
                     <div className="flex-shrink-0 p-2 bg-gray-800/50 rounded-md self-center mb-4">
@@ -97,7 +162,7 @@ function App() {
                         <button onClick={() => setView('heatmap')} className={`px-4 py-2 text-sm font-medium rounded-md ${view === 'heatmap' ? 'bg-indigo-600 text-white' : 'text-gray-300 hover:bg-gray-700'}`}>Heatmap</button>
                     </div>
                     <div className="flex-grow w-full h-full overflow-hidden">
-                        {view === 'flamegraph' ? <FlameGraph data={data.flamegraph} /> : <Heatmap data={data.heatmap} />}
+                        {view === 'flamegraph' ? <FlameGraph data={filteredData.flamegraph} /> : <Heatmap data={originalData.heatmap} timeRange={timeRange} onTimeRangeSelect={setTimeRange} />}
                     </div>
                 </div>
              );
@@ -111,18 +176,73 @@ function App() {
                 <p className="text-gray-400">Select or drop a <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">.perf</code> file to begin.</p>
                 <p className="mt-2 text-sm max-w-2xl mx-auto text-gray-500">All processing is done securely in your browser. Your data never leaves your machine.</p>
 
-                <div className="mt-8 text-left w-full bg-gray-800/50 p-6 rounded-lg border border-gray-700">
-                    <h3 className="font-semibold text-lg text-white mb-3 text-center">How to Generate a <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">.perf</code> file</h3>
-                    <div className="space-y-4">
-                        <div>
-                            <p className="text-sm font-medium text-gray-300">1. Record performance data:</p>
-                            <pre className="bg-black/40 border border-gray-600 text-cyan-300 text-sm p-3 rounded-md mt-1 overflow-x-auto"><code>perf record -F 99 -a -g -- sleep 30</code></pre>
+                <div className="mt-8 text-left w-full bg-gray-800/50 rounded-lg border border-gray-700">
+                    <button
+                        onClick={() => setIsGenerateHelpOpen(!isGenerateHelpOpen)}
+                        className="w-full flex justify-between items-center p-6 text-lg font-semibold text-white text-center"
+                    >
+                        <h3>How to Generate a <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">.perf</code> file</h3>
+                        <svg
+                            className={`w-6 h-6 transform transition-transform duration-200 ${isGenerateHelpOpen ? 'rotate-180' : ''}`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                    </button>
+                    {isGenerateHelpOpen && (
+                        <div className="px-6 pb-6 space-y-4">
+                            <div>
+                                <p className="text-sm font-medium text-gray-300">1. Record performance data:</p>
+                                <pre className="bg-black/40 border border-gray-600 text-cyan-300 text-sm p-3 rounded-md mt-1 overflow-x-auto"><code>perf record -F 99 -a -g -- sleep 30</code></pre>
+                            </div>
+                            <div>
+                                <p className="text-sm font-medium text-gray-300">2. Convert to a text file:</p>
+                                <pre className="bg-black/40 border border-gray-600 text-cyan-300 text-sm p-3 rounded-md mt-1 overflow-x-auto"><code>perf script &gt; my_profile.perf</code></pre>
+                            </div>
                         </div>
-                        <div>
-                            <p className="text-sm font-medium text-gray-300">2. Convert to a text file:</p>
-                            <pre className="bg-black/40 border border-gray-600 text-cyan-300 text-sm p-3 rounded-md mt-1 overflow-x-auto"><code>perf script &gt; my_profile.perf</code></pre>
+                    )}
+                </div>
+
+                <div className="mt-8 text-left w-full bg-gray-800/50 rounded-lg border border-gray-700">
+                    <button
+                        onClick={() => setIsProfilingHelpOpen(!isProfilingHelpOpen)}
+                        className="w-full flex justify-between items-center p-6 text-lg font-semibold text-white text-center"
+                    >
+                        <h3>Getting Better Stack Traces</h3>
+                        <svg
+                            className={`w-6 h-6 transform transition-transform duration-200 ${isProfilingHelpOpen ? 'rotate-180' : ''}`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
+                    </button>
+                    {isProfilingHelpOpen && (
+                        <div className="px-6 pb-6 space-y-4 text-sm">
+                            <p className="text-gray-400">For interpreted or JIT-compiled languages, you may need to enable specific options to ensure frame pointers are preserved, which is essential for accurate stack traces.</p>
+                            <div>
+                                <p className="font-medium text-gray-300">Java / JVM:</p>
+                                <pre className="bg-black/40 border border-gray-600 text-cyan-300 text-sm p-3 rounded-md mt-1 overflow-x-auto"><code>java -XX:+PreserveFramePointer ...</code></pre>
+                            </div>
+                            <div>
+                                <p className="font-medium text-gray-300">Node.js:</p>
+                                <pre className="bg-black/40 border border-gray-600 text-cyan-300 text-sm p-3 rounded-md mt-1 overflow-x-auto"><code>node --perf-basic-prof ...</code></pre>
+                            </div>
+                            <div>
+                                <p className="font-medium text-gray-300">Python:</p>
+                                <p className="text-gray-400 mt-1">Python profiling with <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">perf</code> can be complex. Consider using tools like <a href="https://github.com/benfred/py-spy" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">py-spy</a> which can generate compatible flamegraphs directly.</p>
+                            </div>
+                             <div>
+                                <p className="font-medium text-gray-300">Go:</p>
+                                <p className="text-gray-400 mt-1">Go programs usually provide good symbols by default. Build your application with <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">go build -toolexec="perf record"</code> or use the built-in pprof tool.</p>
+                            </div>
                         </div>
-                    </div>
+                    )}
                 </div>
             </div>
         );
@@ -142,7 +262,7 @@ function App() {
                         id="file-upload"
                     />
                     <label htmlFor="file-upload" className="cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
-                        {data ? 'Load New Perf File' : 'Select Perf File'}
+                        {originalData ? 'Load New Perf File' : 'Select Perf File'}
                     </label>
                 </div>
             </header>

@@ -44,21 +44,36 @@ function parsePerfScript(text: string) {
 
 function buildFlamegraphData(samples: { stack: string[], time: number }[]): FlamegraphNode {
     const root: FlamegraphNode = { name: 'root', value: 0, children: [] };
+    if (samples.length > 0) {
+        root.startTime = samples[0].time;
+        root.endTime = samples[samples.length - 1].time;
+    }
 
     for (const sample of samples) {
         let currentNode: FlamegraphNode = root;
-        root.value++; // Increment root for total samples
 
         for (let i = 0; i < sample.stack.length; i++) {
             const frameName = sample.stack[i];
             let childNode = currentNode.children.find((c) => c.name === frameName);
 
             if (!childNode) {
-                childNode = { name: frameName, value: 0, children: [] };
+                childNode = {
+                    name: frameName,
+                    value: 0,
+                    children: [],
+                    startTime: sample.time,
+                    endTime: sample.time
+                };
                 currentNode.children.push(childNode);
+            } else {
+                if (childNode.startTime && childNode.startTime > sample.time) {
+                    childNode.startTime = sample.time;
+                }
+                if (childNode.endTime && childNode.endTime < sample.time) {
+                    childNode.endTime = sample.time;
+                }
             }
 
-            // Only increment the value of the leaf node for this sample
             if (i === sample.stack.length - 1) {
                 childNode.value++;
             }
@@ -67,27 +82,22 @@ function buildFlamegraphData(samples: { stack: string[], time: number }[]): Flam
         }
     }
 
-    // Post-process to remove nodes with 0 value that are not leaves.
-    // This can happen if a frame is always a parent but never a leaf.
-    function removeZeroValueNodes(node: FlamegraphNode) {
-        node.children = node.children.filter(child => {
-            removeZeroValueNodes(child);
-            // Keep the node if it has children or if its value is greater than 0
-            return child.children.length > 0 || child.value > 0;
-        });
-    }
-
-    // It's better to let d3.sum handle the values of the parents
-    // so we reset all but the leaf values to 0.
-    function resetParentValues(node: FlamegraphNode) {
+    function resetParentValuesAndPropagateTimes(node: FlamegraphNode) {
         if (node.children.length > 0) {
             node.value = 0;
-        }
-        for (const child of node.children) {
-            resetParentValues(child);
+            let minStartTime = Infinity;
+            let maxEndTime = -Infinity;
+            for (const child of node.children) {
+                resetParentValuesAndPropagateTimes(child);
+                if (child.startTime && child.startTime < minStartTime) minStartTime = child.startTime;
+                if (child.endTime && child.endTime > maxEndTime) maxEndTime = child.endTime;
+            }
+            node.startTime = minStartTime;
+            node.endTime = maxEndTime;
         }
     }
-    resetParentValues(root);
+
+    resetParentValuesAndPropagateTimes(root);
     root.value = 0; // Root value will be summed up by d3
 
     return root;
@@ -127,7 +137,7 @@ function buildHeatmapData(samples: { stack: string[], time: number }[]): Heatmap
         }
     }
 
-    return { data: heatmapData, maxTime: numSeconds, maxCount };
+    return { data: heatmapData, maxTime: numSeconds, maxCount, firstTime };
 }
 
 self.onmessage = (e: MessageEvent<{ fileContent: string }>)=> {
