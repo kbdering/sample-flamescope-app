@@ -21,6 +21,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
     const [prunedNodes, setPrunedNodes] = useState<Set<string>>(new Set());
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: FlamegraphHierarchyNode } | null>(null);
     const [colorByCpuCost, setColorByCpuCost] = useState(false);
+    const [zoomTarget, setZoomTarget] = useState<FlamegraphHierarchyNode | null>(null);
 
     const colorScale = d3.scaleOrdinal(d3.schemePaired);
 
@@ -29,8 +30,8 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             clearTimeout(tooltipTimer.current);
         }
 
-        const descendantCount = d.descendants().length - 1; // Count of all descendants
-        const stackSize = d.depth; // Assuming stack size is depth
+        const descendantCount = d.descendants().length - 1;
+        const stackSize = d.depth;
         const processInfo = d.data.process ? `<br>Process: ${d.data.process}` : '';
         const maxCpu = d.data.maxCpuCost ? `<br>Max CPU: ${d.data.maxCpuCost.toLocaleString()}` : '';
         const avgCpu = d.data.totalCpuCost && d.data.value > 0 ? `<br>Avg CPU: ${(d.data.totalCpuCost / d.data.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
@@ -55,22 +56,18 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         setTooltip(null);
     };
 
+    const handleClick = (event: React.MouseEvent, d: FlamegraphHierarchyNode) => {
+        event.stopPropagation();
+        setZoomTarget(d);
+    };
+
     const handleContextMenu = (event: React.MouseEvent, d: FlamegraphHierarchyNode) => {
-        event.preventDefault(); // Prevent default context menu
-
+        event.preventDefault();
         if (!containerRef.current) return;
-
         const containerRect = containerRef.current.getBoundingClientRect();
         const x = event.pageX - containerRect.left;
         const y = event.pageY - containerRect.top;
-
-        const newContextMenu = {
-            x: x,
-            y: y,
-            node: d,
-        };
-        setContextMenu(newContextMenu);
-        
+        setContextMenu({ x, y, node: d });
     };
 
     const handleClearPruned = () => {
@@ -83,13 +80,11 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             setPrunedNodes(prev => {
                 const newSet = new Set(prev);
                 contextMenu.node.each(node => {
-                    if (node.data._path) {
-                        newSet.add(node.data._path);
-                    }
+                    if (node.data._path) newSet.add(node.data._path);
                 });
                 return newSet;
             });
-            setContextMenu(null); // Hide context menu
+            setContextMenu(null);
             setGeneration(g => g + 1);
         }
     };
@@ -103,32 +98,18 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
                 newMap.set(node.data.name, !currentState);
                 return newMap;
             });
-            setContextMenu(null); // Hide context menu
+            setContextMenu(null);
             setGeneration(g => g + 1);
         }
     };
 
     useEffect(() => {
         if (data) {
-            rootRef.current = d3.hierarchy(data, d => {
-                if (Array.isArray(d.children)) {
-                    return d.children.filter((child): child is FlamegraphNode =>
-                        child !== null && child !== undefined &&
-                        typeof child === 'object' &&
-                        'name' in child && 'value' in child && 'children' in child
-                    );
-                }
-                return undefined;
-            }) as FlamegraphHierarchyNode;
-            
+            rootRef.current = d3.hierarchy(data, d => d.children?.filter(c => c && typeof c === 'object' && 'name' in c && 'value' in c && 'children' in c)) as FlamegraphHierarchyNode;
             rootRef.current.sum(d => d.value ?? 0);
             rootRef.current.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
-
-            // Assign a unique path to each node for stable identification
             rootRef.current.each((node: FlamegraphHierarchyNode) => {
-                if (node.data) {
-                    node.data._path = (node.parent ? node.parent.data._path + '/' : '') + node.data.name;
-                }
+                if (node.data) node.data._path = (node.parent ? node.parent.data._path + '/' : '') + node.data.name;
             });
         }
     }, [data]);
@@ -138,191 +119,122 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
 
         const width = containerRef.current.offsetWidth;
         const height = containerRef.current.offsetHeight;
-
         const svg = d3.select(svgRef.current);
         svg.selectAll("*").remove();
-
         svg.attr('viewBox', [0, 0, width, height].join(' '));
 
         const root = rootRef.current.copy();
-
-        // Apply collapsed and pruned states
         root.each(node => {
             if (node.data) {
                 node.data._collapsed = collapsedNodes.get(node.data.name) ?? false;
-                if (node.data._path) {
-                    node.data._pruned = prunedNodes.has(node.data._path);
-                }
+                if (node.data._path) node.data._pruned = prunedNodes.has(node.data._path);
             }
         });
-        
-        root.each(node => {
-            if (node.data?._pruned) {
-                node.each(descendant => {
-                    if (descendant.data) {
-                        descendant.data._pruned = true;
-                    }
-                });
-            }
-        });
-
+        root.each(node => { if (node.data?._pruned) node.each(d => { if (d.data) d.data._pruned = true; }); });
         root.eachAfter(node => {
             let sum = (node.data && !node.data._pruned) ? (node.data.value ?? 0) : 0;
-            if (node.children) {
-                for (const child of node.children) {
-                    sum += child.value;
-                }
-            }
+            if (node.children) sum += node.children.reduce((acc, child) => acc + child.value, 0);
             node.value = sum;
         });
 
         const partition = d3.partition<FlamegraphNode>().size([width, height]).padding(1);
         partition(root);
 
+        let z = root;
+        if (zoomTarget && zoomTarget.data._path) {
+            root.each(n => { if (n.data._path === zoomTarget.data._path) z = n; });
+        }
+
         const visibleNodes = root.descendants().filter(d => {
-            if (d.value <= 0) return false;
-            if (d.data._pruned) return false;
+            if (d.value <= 0 || d.data._pruned) return false;
             let current = d.parent;
             while (current) {
                 if (current.data._collapsed) return false;
                 current = current.parent;
             }
-            return true;
+            return d.x1 > z.x0 && d.x0 < z.x1;
         });
 
         const max_y1 = d3.max(visibleNodes, d => d.y1) ?? height;
-        const yScale = d3.scaleLinear().domain([0, max_y1]).range([0, height]);
-
+        const xScale = d3.scaleLinear().domain([z.x0, z.x1]).range([0, width]);
+        const yScale = d3.scaleLinear().domain([z.y0, max_y1]).range([0, height]);
         const maxCpuCost = d3.max(visibleNodes, d => d.data.maxCpuCost) || 0;
         const cpuColorScale = d3.scaleSequential(d3.interpolateReds).domain([0, maxCpuCost]);
 
-        const cell = svg
-            .selectAll("g")
-            .data(visibleNodes)
-            .join("g")
-            .attr("transform", d => `translate(${d.x0},${height - yScale(d.y1)})`);
+        const cell = svg.selectAll("g").data(visibleNodes).join("g").attr("transform", d => `translate(${xScale(d.x0)},${height - yScale(d.y1)})`);
 
         cell.append("rect")
-            .attr("width", d => d.x1 - d.x0)
-            .attr("height", d => {
-                const h = yScale(d.y1) - yScale(d.y0);
-                return h < 0 ? 0 : h;
-            })
-            .attr("fill", d => {
-                if (d.data._collapsed) return '#aaa';
-                if (colorByCpuCost) {
-                    return cpuColorScale(d.data.maxCpuCost || 0);
-                }
-                return colorScale(d.data.name);
-            })
+            .attr("width", d => xScale(d.x1) - xScale(d.x0))
+            .attr("height", d => Math.max(0, yScale(d.y1) - yScale(d.y0)))
+            .attr("fill", d => d.data._collapsed ? '#aaa' : colorByCpuCost ? cpuColorScale(d.data.maxCpuCost || 0) : colorScale(d.data.name))
             .attr("class", "flamegraph-rect")
-            .on("mouseover", (e, d) => handleMouseOver(e, d as d3.HierarchyRectangularNode<FlamegraphNode>))
+            .on("mouseover", (e, d) => handleMouseOver(e, d as FlamegraphHierarchyNode))
             .on("mouseout", handleMouseOut)
+            .on("click", (e, d) => handleClick(e, d as FlamegraphHierarchyNode))
             .on("contextmenu", (e, d) => handleContextMenu(e, d as FlamegraphHierarchyNode));
 
-        cell.filter(d => d.data._collapsed)
-            .append('text')
-            .attr('x', d => ((d.x1 - d.x0) / 2))
-            .attr('y', d => {
-                const h = yScale(d.y1) - yScale(d.y0);
-                return h / 2;
-            })
-            .attr('dy', '0.35em')
-            .attr('text-anchor', 'middle')
-            .style('font-size', '16px')
-            .style('font-weight', 'bold')
-            .style('pointer-events', 'none')
-            .attr('fill', 'white')
-            .text('+');
+        cell.filter(d => d.data._collapsed).append('text').attr('x', d => (xScale(d.x1) - xScale(d.x0)) / 2).attr('y', d => (yScale(d.y1) - yScale(d.y0)) / 2).attr('dy', '0.35em').attr('text-anchor', 'middle').style('font-size', '16px').style('font-weight', 'bold').style('pointer-events', 'none').attr('fill', 'white').text('+');
 
-        cell.append("text")
-            .attr("x", 4)
-            .attr("y", d => {
-                const h = yScale(d.y1) - yScale(d.y0);
-                return (h < 0 ? 0 : h) - 4;
-            })
-            .attr("fill", "white")
-            .style("font-size", "12px")
-            .style("pointer-events", "none")
-            .each(function(d) {
-                const node = d3.select(this);
-                const width = (d.x1 ?? 0) - (d.x0 ?? 0);
-                if (width < 20) {
-                    node.text("");
-                    return;
-                }
-                
-                const tempText = svg.append("text")
-                    .attr("font-size", "12px")
-                    .text(d.data.name);
-                
-                const textNode = tempText.node();
-                if (!textNode) {
-                    node.text(d.data.name);
-                    tempText.remove();
-                    return;
-                }
+        cell.append("text").attr("x", 4).attr("y", d => Math.max(0, yScale(d.y1) - yScale(d.y0)) - 4).attr("fill", "white").style("font-size", "12px").style("pointer-events", "none").each(function(d) {
+            const node = d3.select(this);
+            const rectWidth = xScale(d.x1) - xScale(d.x0);
+            if (rectWidth < 20) { node.text(""); return; }
+            const tempText = svg.append("text").attr("font-size", "12px").text(d.data.name);
+            const textNode = tempText.node();
+            if (!textNode) { node.text(d.data.name); tempText.remove(); return; }
+            const textLength = textNode.getComputedTextLength();
+            let text = d.data.name;
+            if (textLength > rectWidth - 8) {
+                const avgCharWidth = textLength / text.length;
+                const maxChars = Math.floor((rectWidth - 8) / avgCharWidth);
+                text = maxChars > 3 ? text.substring(0, maxChars - 3) + "..." : "";
+            }
+            node.text(text);
+            truncatedNames.current.set(d.data, text);
+            tempText.remove();
+        });
 
-                const textLength = tempText.node()!.getComputedTextLength();
-                let text = d.data.name;
-                if (textLength > width - 8) {
-                    const avgCharWidth = textLength / text.length;
-                    const maxChars = Math.floor((width - 8) / avgCharWidth);
-                    if (maxChars > 3) {
-                        text = text.substring(0, maxChars - 3) + "...";
-                    } else {
-                        text = "";
-                    }
-                }
-                node.text(text);
-                truncatedNames.current.set(d.data, text);
-                tempText.remove();
-            });
-
-    }, [generation, colorScale, handleMouseOver, collapsedNodes, prunedNodes, colorByCpuCost]);
+    }, [generation, colorScale, handleMouseOver, collapsedNodes, prunedNodes, colorByCpuCost, zoomTarget]);
 
     return (
-        <div ref={containerRef} className="w-full h-full relative">
-            <div className="absolute top-2 right-2 flex items-center space-x-2">
-                <label className="flex items-center space-x-1 text-white text-sm">
-                    <input type="checkbox" checked={colorByCpuCost} onChange={() => setColorByCpuCost(!colorByCpuCost)} className="form-checkbox h-4 w-4 text-indigo-600 bg-gray-800 border-gray-600 rounded focus:ring-indigo-500" />
-                    <span>Color by CPU Cost</span>
-                </label>
-                <button
-                    onClick={() => setCollapsedNodes(new Map())}
-                    className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-sm"
-                >
-                    Expand All
-                </button>
-                <button
-                    onClick={handleClearPruned}
-                    className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded text-sm"
-                >
-                    Clear Pruned
-                </button>
+        <div className="w-full h-full flex flex-col">
+            <div className="w-full h-8 bg-gray-900 text-white flex items-center px-2 text-sm flex-shrink-0">
+                <span className="font-bold">Path:</span>
+                <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(null); }}>Root</a>
+                {zoomTarget && zoomTarget.ancestors().reverse().slice(1).map(ancestor => (
+                    <span key={ancestor.data._path}>
+                        {' > '}
+                        <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(ancestor); }}>
+                            {ancestor.data.name}
+                        </a>
+                    </span>
+                ))}
+                {zoomTarget && <span className="font-bold text-yellow-400">{' > '}{zoomTarget.data.name}</span>}
             </div>
-            <svg ref={svgRef} width="100%" height="100%"></svg>
-            {tooltip && <Tooltip content={tooltip.content} position={tooltip.position} />}
-            {contextMenu && (
-                <div
-                    className="absolute bg-purple-500 border-4 border-yellow-400 shadow-lg rounded py-1 z-[9999] w-48"
-                    style={{ top: contextMenu.y, left: contextMenu.x }}
-                    onMouseLeave={() => setContextMenu(null)} // Hide context menu when mouse leaves
-                >
-                    <button
-                        onClick={handlePruneNode}
-                        className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600"
-                    >
-                        Prune Node
-                    </button>
-                    <button
-                        onClick={handleToggleCollapse}
-                        className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600"
-                    >
-                        {collapsedNodes.get(contextMenu.node.data.name) ? 'Expand Node' : 'Collapse Node'}
-                    </button>
+            <div ref={containerRef} className="w-full h-full relative flex-grow">
+                <div className="absolute top-2 right-2 flex items-center space-x-2 z-10">
+                    <label className="flex items-center space-x-1 text-white text-sm">
+                        <input type="checkbox" checked={colorByCpuCost} onChange={() => setColorByCpuCost(!colorByCpuCost)} className="form-checkbox h-4 w-4 text-indigo-600 bg-gray-800 border-gray-600 rounded focus:ring-indigo-500" />
+                        <span>Color by CPU Cost</span>
+                    </label>
+                    <button onClick={() => setCollapsedNodes(new Map())} className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-sm">Expand All</button>
+                    <button onClick={handleClearPruned} className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded text-sm">Clear Pruned</button>
                 </div>
-            )}
+                <svg ref={svgRef} width="100%" height="100%"></svg>
+                {tooltip && <Tooltip content={tooltip.content} position={tooltip.position} />}
+                {contextMenu && (
+                    <div
+                        className="absolute bg-purple-500 border-4 border-yellow-400 shadow-lg rounded py-1 z-[9999] w-48"
+                        style={{ top: contextMenu.y, left: contextMenu.x }}
+                        onMouseLeave={() => setContextMenu(null)}
+                    >
+                        <button onClick={handlePruneNode} className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600">Prune Node</button>
+                        <button onClick={handleToggleCollapse} className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600">
+                            {collapsedNodes.get(contextMenu.node.data.name) ? 'Expand Node' : 'Collapse Node'}
+                        </button>
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
