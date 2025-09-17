@@ -55,20 +55,6 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         setTooltip(null);
     };
 
-    const handleClick = (event: React.MouseEvent, d: FlamegraphHierarchyNode) => {
-        event.stopPropagation();
-        setCollapsedNodes(prev => {
-            const newMap = new Map(prev);
-            const currentState = newMap.get(d.data.name) || false; // Use d.data.name
-            newMap.set(d.data.name, !currentState);
-            return newMap;
-        });
-
-        setGeneration(g => {
-            return g + 1;
-        });
-    };
-
     const handleContextMenu = (event: React.MouseEvent, d: FlamegraphHierarchyNode) => {
         event.preventDefault(); // Prevent default context menu
 
@@ -78,12 +64,9 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         const x = event.pageX - containerRect.left;
         const y = event.pageY - containerRect.top;
 
-        const menuHeight = 96; // Hardcoded height for now (h-24 = 96px)
-        const adjustedY = y + menuHeight > containerRect.height ? y - menuHeight : y;
-
         const newContextMenu = {
             x: x,
-            y: adjustedY,
+            y: y,
             node: d,
         };
         setContextMenu(newContextMenu);
@@ -105,6 +88,20 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
                     }
                 });
                 return newSet;
+            });
+            setContextMenu(null); // Hide context menu
+            setGeneration(g => g + 1);
+        }
+    };
+
+    const handleToggleCollapse = () => {
+        if (contextMenu) {
+            const { node } = contextMenu;
+            setCollapsedNodes(prev => {
+                const newMap = new Map(prev);
+                const currentState = newMap.get(node.data.name) || false;
+                newMap.set(node.data.name, !currentState);
+                return newMap;
             });
             setContextMenu(null); // Hide context menu
             setGeneration(g => g + 1);
@@ -221,8 +218,22 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             .attr("class", "flamegraph-rect")
             .on("mouseover", (e, d) => handleMouseOver(e, d as d3.HierarchyRectangularNode<FlamegraphNode>))
             .on("mouseout", handleMouseOut)
-            .on("click", (e, d) => handleClick(e, d as FlamegraphHierarchyNode))
             .on("contextmenu", (e, d) => handleContextMenu(e, d as FlamegraphHierarchyNode));
+
+        cell.filter(d => d.data._collapsed)
+            .append('text')
+            .attr('x', d => ((d.x1 - d.x0) / 2))
+            .attr('y', d => {
+                const h = yScale(d.y1) - yScale(d.y0);
+                return h / 2;
+            })
+            .attr('dy', '0.35em')
+            .attr('text-anchor', 'middle')
+            .style('font-size', '16px')
+            .style('font-weight', 'bold')
+            .style('pointer-events', 'none')
+            .attr('fill', 'white')
+            .text('+');
 
         cell.append("text")
             .attr("x", 4)
@@ -294,7 +305,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             {tooltip && <Tooltip content={tooltip.content} position={tooltip.position} />}
             {contextMenu && (
                 <div
-                    className="absolute bg-purple-500 border-4 border-yellow-400 shadow-lg rounded py-1 z-[9999] w-48 h-24 flex items-center justify-center"
+                    className="absolute bg-purple-500 border-4 border-yellow-400 shadow-lg rounded py-1 z-[9999] w-48"
                     style={{ top: contextMenu.y, left: contextMenu.x }}
                     onMouseLeave={() => setContextMenu(null)} // Hide context menu when mouse leaves
                 >
@@ -303,6 +314,12 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
                         className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600"
                     >
                         Prune Node
+                    </button>
+                    <button
+                        onClick={handleToggleCollapse}
+                        className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600"
+                    >
+                        {collapsedNodes.get(contextMenu.node.data.name) ? 'Expand Node' : 'Collapse Node'}
                     </button>
                 </div>
             )}
