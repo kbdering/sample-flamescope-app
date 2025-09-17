@@ -283,12 +283,12 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
                 {tooltip && <Tooltip content={tooltip.content} position={tooltip.position} />}
                 {contextMenu && (
                     <div
-                        className="absolute bg-purple-500 border-4 border-yellow-400 shadow-lg rounded py-1 z-[9999] w-48"
+                        className="absolute bg-gray-100 border border-gray-300 shadow-lg rounded py-1 z-[9999] w-48"
                         style={{ top: contextMenu.y, left: contextMenu.x }}
                         onMouseLeave={() => setContextMenu(null)}
                     >
-                        <button onClick={handlePruneNode} className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600">Prune Node</button>
-                        <button onClick={handleToggleCollapse} className="block w-full text-left px-4 py-2 text-sm text-white hover:bg-purple-600">
+                        <button onClick={handlePruneNode} className="block w-full text-left px-4 py-2 text-sm text-gray-800 hover:bg-gray-200">Prune Node</button>
+                        <button onClick={handleToggleCollapse} className="block w-full text-left px-4 py-2 text-sm text-gray-800 hover:bg-gray-200">
                             {collapsedNodes.get(contextMenu.node.data.name) ? 'Expand Node' : 'Collapse Node'}
                         </button>
                     </div>

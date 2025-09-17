@@ -46,3 +46,15 @@ pre {
   overflow-x: auto;
 }
 
+.tooltip {
+    background-color: #fff;
+    color: #333;
+    border: 1px solid #ccc;
+    padding: 8px;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    font-size: 12px;
+    max-width: 300px;
+    word-wrap: break-word;
+}
+
