@@ -225,18 +225,46 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
 
     return (
         <div className="w-full h-full flex flex-col">
-            <div className="w-full h-8 bg-gray-900 text-white flex items-center px-2 text-sm flex-shrink-0">
-                <span className="font-bold">Path:</span>
+            <div className="w-full h-8 bg-gray-900 text-white flex items-center px-2 text-sm flex-shrink-0 overflow-hidden whitespace-nowrap">
+                <span className="font-bold mr-2">Path:</span>
                 <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(null); }}>Root</a>
-                {zoomTarget && zoomTarget.ancestors().reverse().slice(1).map(ancestor => (
-                    <span key={ancestor.data._path}>
-                        {' > '}
-                        <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(ancestor); }}>
-                            {ancestor.data.name}
-                        </a>
-                    </span>
-                ))}
-                {zoomTarget && <span className="font-bold text-yellow-400">{' > '}{zoomTarget.data.name}</span>}
+                {(() => {
+                    if (!zoomTarget) return null;
+
+                    const ancestors = zoomTarget.ancestors().reverse().slice(1);
+                    const maxPathSegments = 5;
+
+                    let segmentsToRender = [];
+                    if (ancestors.length <= maxPathSegments) {
+                        segmentsToRender = ancestors.map(a => ({ type: 'link', node: a }));
+                    } else {
+                        segmentsToRender = [
+                            ...ancestors.slice(0, 2).map(a => ({ type: 'link', node: a })),
+                            { type: 'ellipsis' },
+                            ...ancestors.slice(ancestors.length - 2).map(a => ({ type: 'link', node: a }))
+                        ];
+                    }
+
+                    return (
+                        <>
+                            {segmentsToRender.map((seg, i) => (
+                                <span key={seg.type === 'link' ? seg.node.data._path : `ellipsis-${i}`}>
+                                    {seg.type === 'ellipsis' ? (
+                                        <span className="px-2">...</span>
+                                    ) : (
+                                        <>
+                                            {' > '}
+                                            <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(seg.node as FlamegraphHierarchyNode); }}>
+                                                {(seg.node as FlamegraphHierarchyNode).data.name}
+                                            </a>
+                                        </>
+                                    )}
+                                </span>
+                            ))}
+                            <span className="font-bold text-yellow-400">{' > '}{zoomTarget.data.name}</span>
+                        </>
+                    );
+                })()}
             </div>
             <div ref={containerRef} className="w-full h-full relative flex-grow">
                 <div className="absolute top-2 right-2 flex items-center space-x-2 z-10">
