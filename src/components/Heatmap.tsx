@@ -20,6 +20,17 @@ export const Heatmap: React.FC<HeatmapProps> = ({ data, timeRange, onTimeRangeSe
 
     const getCellId = (d: { second: number, interval: number }) => `${d.second}-${d.interval}`;
 
+    const blendWithSelectionColor = (baseColorStr: string) => {
+        const baseColor = d3.color(baseColorStr)?.rgb();
+        if (!baseColor) return baseColorStr;
+        const selectionColor = { r: 96, g: 165, b: 250 }; // from #60a5fa
+        const alpha = 0.3; // Using a lower alpha for better visibility
+        const r = baseColor.r * (1 - alpha) + selectionColor.r * alpha;
+        const g = baseColor.g * (1 - alpha) + selectionColor.g * alpha;
+        const b = baseColor.b * (1 - alpha) + selectionColor.b * alpha;
+        return `rgb(${r}, ${g}, ${b})`;
+    };
+
     // Effect for drawing the chart and setting up interactive listeners
     useEffect(() => {
         if (!data || !svgRef.current || !containerRef.current) return;
@@ -35,7 +46,7 @@ export const Heatmap: React.FC<HeatmapProps> = ({ data, timeRange, onTimeRangeSe
             .attr("width", width + margin.left + margin.right)
             .attr("height", height + margin.top + margin.bottom);
 
-        svg.selectAll("*").remove();
+        svg.selectAll("*" ).remove();
 
         const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
         gRef.current = g;
@@ -109,17 +120,17 @@ export const Heatmap: React.FC<HeatmapProps> = ({ data, timeRange, onTimeRangeSe
 
                 if (event.shiftKey) {
                     // Shift is an exclusive mode
-                    g.selectAll('.heatmap-rect').data(heatmapData).style("fill", d => color(d.count));
+                    g.selectAll('.heatmap-rect').style("fill", d => color((d as any).count));
                     selectedCells.clear();
                 } else if (!event.ctrlKey && !event.metaKey) {
-                    g.selectAll('.heatmap-rect').data(heatmapData).style("fill", d => color(d.count));
+                    g.selectAll('.heatmap-rect').style("fill", d => color((d as any).count));
                     selectedCells.clear();
                 }
 
                 const id = getCellId(d);
                 if (!selectedCells.has(id)) {
                     selectedCells.add(id);
-                    d3.select(this).style('fill', '#60a5fa');
+                    d3.select(this).style('fill', blendWithSelectionColor(color(d.count)));
                 }
             })
             .on("mouseover", function(event, d) {
@@ -174,7 +185,7 @@ export const Heatmap: React.FC<HeatmapProps> = ({ data, timeRange, onTimeRangeSe
                                 const id = getCellId(cd as any);
                                 if (!selectedCells.has(id)) {
                                     selectedCells.add(id);
-                                    d3.select(this).style('fill', '#60a5fa');
+                                    d3.select(this).style('fill', blendWithSelectionColor(color((cd as any).count)));
                                 }
                             });
 
@@ -182,7 +193,7 @@ export const Heatmap: React.FC<HeatmapProps> = ({ data, timeRange, onTimeRangeSe
                         const id = getCellId(d);
                         if (!selectedCells.has(id)) {
                             selectedCells.add(id);
-                            d3.select(this).style('fill', '#60a5fa');
+                            d3.select(this).style('fill', blendWithSelectionColor(color(d.count)));
                         }
                     }
                 } else {
@@ -220,10 +231,11 @@ export const Heatmap: React.FC<HeatmapProps> = ({ data, timeRange, onTimeRangeSe
 
         gRef.current.selectAll('.heatmap-rect')
             .style('fill', function(d) {
+                const baseColor = color((d as any).count);
                 if (cellsToHighlight.has(getCellId(d as any))) {
-                    return '#60a5fa';
+                    return blendWithSelectionColor(baseColor);
                 }
-                return color((d as any).count);
+                return baseColor;
             });
 
     }, [timeRange]);
