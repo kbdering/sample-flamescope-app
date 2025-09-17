@@ -3,6 +3,16 @@ import * as d3 from 'd3';
 import { Tooltip } from './Tooltip';
 import type { FlamegraphNode } from '../types';
 
+enum OriginType { Kernel, JIT, System, User }
+
+function getOriginType(name: string): OriginType {
+    if (name.startsWith('[k]')) return OriginType.Kernel;
+    if (name.includes('_JIT_') || name.includes('jit')) return OriginType.JIT;
+    if (name.startsWith('node::') || name.startsWith('v8::')) return OriginType.System;
+    if (name.endsWith('_') && name.length > 2 && name[name.length-2] === 's') return OriginType.Kernel;
+    return OriginType.User;
+}
+
 type FlamegraphHierarchyNode = d3.HierarchyRectangularNode<FlamegraphNode>;
 
 interface FlameGraphProps {
@@ -20,29 +30,44 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
     const [collapsedNodes, setCollapsedNodes] = useState<Map<string, boolean>>(new Map());
     const [prunedNodes, setPrunedNodes] = useState<Set<string>>(new Set());
     const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: FlamegraphHierarchyNode } | null>(null);
-    const [colorByCpuCost, setColorByCpuCost] = useState(false);
+    const [colorMode, setColorMode] = useState('name');
     const [zoomTarget, setZoomTarget] = useState<FlamegraphHierarchyNode | null>(null);
 
-    const colorScale = d3.scaleOrdinal(d3.schemePaired);
+    const nameToColor = useRef<Map<string, string>>(new Map());
+    const getColor = (name: string) => {
+        if (!nameToColor.current.has(name)) {
+            let hash = name.split('').reduce((acc, char) => char.charCodeAt(0) + ((acc << 5) - acc), 0);
+            hash = Math.abs(hash);
+            const hashNormalized = (hash % 1000) / 1000;
+            nameToColor.current.set(name, d3.interpolateTurbo(hashNormalized));
+        }
+        return nameToColor.current.get(name)!;
+    };
+
+    const originColors = {
+        [OriginType.Kernel]: '#d9534f',
+        [OriginType.JIT]: '#428bca',
+        [OriginType.System]: '#5cb85c',
+        [OriginType.User]: '#f0ad4e',
+    };
+
+    const getColorByOrigin = (d: FlamegraphHierarchyNode) => {
+        const originType = getOriginType(d.data.name);
+        const baseColor = originColors[originType];
+        const hcl = d3.hcl(baseColor);
+        hcl.l += (d.depth % 5) * 5 - 10;
+        return hcl.toString();
+    };
 
     const handleMouseOver = useCallback((event: MouseEvent, d: d3.HierarchyRectangularNode<FlamegraphNode>) => {
-        if (tooltipTimer.current) {
-            clearTimeout(tooltipTimer.current);
-        }
-
+        if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
         const descendantCount = d.descendants().length - 1;
         const stackSize = d.depth;
         const processInfo = d.data.process ? `<br>Process: ${d.data.process}` : '';
         const maxCpu = d.data.maxCpuCost ? `<br>Max CPU: ${d.data.maxCpuCost.toLocaleString()}` : '';
         const avgCpu = d.data.totalCpuCost && d.data.value > 0 ? `<br>Avg CPU: ${(d.data.totalCpuCost / d.data.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
-
         const fullContent = `<strong>${d.data.name}</strong><br>${d.value.toLocaleString()} samples${processInfo}<br>Descendants: ${descendantCount}<br>Stack Size: ${stackSize}${maxCpu}${avgCpu}`;
-
-        setTooltip({
-            content: fullContent,
-            position: { x: event.pageX, y: event.pageY - 10 }
-        });
-
+        setTooltip({ content: fullContent, position: { x: event.pageX, y: event.pageY - 10 } });
         tooltipTimer.current = window.setTimeout(() => {
             const shortContent = `<strong>${d.data.name}</strong><br>${d.data.value.toLocaleString()} samples${processInfo}`;
             setTooltip(prev => prev ? { ...prev, content: shortContent } : null);
@@ -50,9 +75,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
     }, []);
 
     const handleMouseOut = () => {
-        if (tooltipTimer.current) {
-            clearTimeout(tooltipTimer.current);
-        }
+        if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
         setTooltip(null);
     };
 
@@ -79,9 +102,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         if (contextMenu) {
             setPrunedNodes(prev => {
                 const newSet = new Set(prev);
-                contextMenu.node.each(node => {
-                    if (node.data._path) newSet.add(node.data._path);
-                });
+                contextMenu.node.each(node => { if (node.data._path) newSet.add(node.data._path); });
                 return newSet;
             });
             setContextMenu(null);
@@ -108,9 +129,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             rootRef.current = d3.hierarchy(data, d => d.children?.filter(c => c && typeof c === 'object' && 'name' in c && 'value' in c && 'children' in c)) as FlamegraphHierarchyNode;
             rootRef.current.sum(d => d.value ?? 0);
             rootRef.current.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
-            rootRef.current.each((node: FlamegraphHierarchyNode) => {
-                if (node.data) node.data._path = (node.parent ? node.parent.data._path + '/' : '') + node.data.name;
-            });
+            rootRef.current.each((node: FlamegraphHierarchyNode) => { if (node.data) node.data._path = (node.parent ? node.parent.data._path + '/' : '') + node.data.name; });
         }
     }, [data]);
 
@@ -164,9 +183,17 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         const cell = svg.selectAll("g").data(visibleNodes).join("g").attr("transform", d => `translate(${xScale(d.x0)},${height - yScale(d.y1)})`);
 
         cell.append("rect")
+            .attr("rx", 3)
             .attr("width", d => xScale(d.x1) - xScale(d.x0))
             .attr("height", d => Math.max(0, yScale(d.y1) - yScale(d.y0)))
-            .attr("fill", d => d.data._collapsed ? '#aaa' : colorByCpuCost ? cpuColorScale(d.data.maxCpuCost || 0) : colorScale(d.data.name))
+            .attr("fill", d => {
+                if (d.data._collapsed) return '#aaa';
+                switch (colorMode) {
+                    case 'cpu': return cpuColorScale(d.data.maxCpuCost || 0);
+                    case 'origin': return getColorByOrigin(d as FlamegraphHierarchyNode);
+                    default: return getColor(d.data.name);
+                }
+            })
             .attr("class", "flamegraph-rect")
             .on("mouseover", (e, d) => handleMouseOver(e, d as FlamegraphHierarchyNode))
             .on("mouseout", handleMouseOut)
@@ -194,7 +221,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             tempText.remove();
         });
 
-    }, [generation, colorScale, handleMouseOver, collapsedNodes, prunedNodes, colorByCpuCost, zoomTarget]);
+    }, [generation, handleMouseOver, collapsedNodes, prunedNodes, colorMode, zoomTarget]);
 
     return (
         <div className="w-full h-full flex flex-col">
@@ -214,8 +241,12 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             <div ref={containerRef} className="w-full h-full relative flex-grow">
                 <div className="absolute top-2 right-2 flex items-center space-x-2 z-10">
                     <label className="flex items-center space-x-1 text-white text-sm">
-                        <input type="checkbox" checked={colorByCpuCost} onChange={() => setColorByCpuCost(!colorByCpuCost)} className="form-checkbox h-4 w-4 text-indigo-600 bg-gray-800 border-gray-600 rounded focus:ring-indigo-500" />
-                        <span>Color by CPU Cost</span>
+                        <span>Color by:</span>
+                        <select value={colorMode} onChange={e => setColorMode(e.target.value)} className="bg-gray-800 border-gray-600 rounded focus:ring-indigo-500 text-white">
+                            <option value="name">Name</option>
+                            <option value="cpu">CPU Cost</option>
+                            <option value="origin">Origin</option>
+                        </select>
                     </label>
                     <button onClick={() => setCollapsedNodes(new Map())} className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-sm">Expand All</button>
                     <button onClick={handleClearPruned} className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded text-sm">Clear Pruned</button>
