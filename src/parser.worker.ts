@@ -110,18 +110,36 @@ function buildFlamegraphData(samples: { stack: string[], time: number, process: 
         }
     }
 
-    function resetParentValuesAndPropagateTimes(node: FlamegraphNode) {
-        if (node.children.length > 0) {
-            node.value = 0;
-            let minStartTime = Infinity;
-            let maxEndTime = -Infinity;
-            for (const child of node.children) {
-                resetParentValuesAndPropagateTimes(child);
-                if (child.startTime && child.startTime < minStartTime) minStartTime = child.startTime;
-                if (child.endTime && child.endTime > maxEndTime) maxEndTime = child.endTime;
+    // Iterative post-order traversal to avoid stack overflow with deep trees
+    function resetParentValuesAndPropagateTimes(rootNode: FlamegraphNode) {
+        type StackEntry = { node: FlamegraphNode; phase: 'descend' | 'process' };
+        const stack: StackEntry[] = [{ node: rootNode, phase: 'descend' }];
+
+        while (stack.length > 0) {
+            const entry = stack[stack.length - 1];
+
+            if (entry.phase === 'descend') {
+                entry.phase = 'process';
+                // Push children onto stack (they'll be processed before this node)
+                for (const child of entry.node.children) {
+                    stack.push({ node: child, phase: 'descend' });
+                }
+            } else {
+                // Process phase - all children have been processed
+                stack.pop();
+
+                if (entry.node.children.length > 0) {
+                    entry.node.value = 0;
+                    let minStartTime = Infinity;
+                    let maxEndTime = -Infinity;
+                    for (const child of entry.node.children) {
+                        if (child.startTime && child.startTime < minStartTime) minStartTime = child.startTime;
+                        if (child.endTime && child.endTime > maxEndTime) maxEndTime = child.endTime;
+                    }
+                    entry.node.startTime = minStartTime;
+                    entry.node.endTime = maxEndTime;
+                }
             }
-            node.startTime = minStartTime;
-            node.endTime = maxEndTime;
         }
     }
 
@@ -168,7 +186,7 @@ function buildHeatmapData(samples: { stack: string[], time: number, process: str
     return { data: heatmapData, maxTime: numSeconds, maxCount, firstTime };
 }
 
-self.onmessage = (e: MessageEvent<{ fileContent: string }>)=> {
+self.onmessage = (e: MessageEvent<{ fileContent: string }>) => {
     const { fileContent } = e.data;
     try {
         const samples = parsePerfScript(fileContent);
@@ -183,4 +201,4 @@ self.onmessage = (e: MessageEvent<{ fileContent: string }>)=> {
 };
 
 // Export {} to make it a module.
-export {};
+export { };

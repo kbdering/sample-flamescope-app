@@ -22,11 +22,15 @@ function App() {
             setIsLoading(false);
             const { status, flamegraphData, heatmapData, message } = e.data;
             if (status === 'success') {
-                const assignPaths = (node: FlamegraphNode, parentPath: string = '') => {
+                // Iterative assignPaths to avoid stack overflow with deep trees
+                const assignPathsStack: { node: FlamegraphNode; parentPath: string }[] = [{ node: flamegraphData, parentPath: '' }];
+                while (assignPathsStack.length > 0) {
+                    const { node, parentPath } = assignPathsStack.pop()!;
                     node._path = parentPath + '/' + node.name;
-                    (node.children || []).forEach(child => assignPaths(child, node._path));
-                };
-                assignPaths(flamegraphData);
+                    for (const child of (node.children || [])) {
+                        assignPathsStack.push({ node: child, parentPath: node._path });
+                    }
+                }
 
                 setOriginalData({ flamegraph: flamegraphData, heatmap: heatmapData });
                 setError(null);
@@ -43,50 +47,74 @@ function App() {
         };
     }, []);
 
-    const filterFlamegraph = (node: FlamegraphNode, minTime: number, maxTime: number): FlamegraphNode | null => {
-        const filteredChildren = (node.children || []).map(child => filterFlamegraph(child, minTime, maxTime)).filter(Boolean) as FlamegraphNode[];
+    // Iterative filterFlamegraph using post-order traversal to avoid stack overflow
+    const filterFlamegraph = (rootNode: FlamegraphNode, minTime: number, maxTime: number): FlamegraphNode | null => {
+        type StackEntry = { node: FlamegraphNode; phase: 'descend' | 'process'; filteredChildren?: FlamegraphNode[] };
+        const stack: StackEntry[] = [{ node: rootNode, phase: 'descend' }];
+        const resultMap = new Map<FlamegraphNode, FlamegraphNode | null>();
 
-        const samplesInNode = (node.samples || []).filter(s => s.time >= minTime && s.time <= maxTime);
+        while (stack.length > 0) {
+            const entry = stack[stack.length - 1];
 
-        const value = samplesInNode.length;
+            if (entry.phase === 'descend') {
+                entry.phase = 'process';
+                // Push children onto stack first (they'll be processed before this node)
+                for (const child of (entry.node.children || [])) {
+                    stack.push({ node: child, phase: 'descend' });
+                }
+            } else {
+                // Process phase - all children have been processed
+                stack.pop();
 
-        if (value === 0 && filteredChildren.length === 0) {
-            return null;
+                const filteredChildren = (entry.node.children || [])
+                    .map(child => resultMap.get(child))
+                    .filter(Boolean) as FlamegraphNode[];
+
+                const samplesInNode = (entry.node.samples || []).filter(s => s.time >= minTime && s.time <= maxTime);
+                const value = samplesInNode.length;
+
+                if (value === 0 && filteredChildren.length === 0) {
+                    resultMap.set(entry.node, null);
+                    continue;
+                }
+
+                const totalCpuCostFromChildren = filteredChildren.reduce((sum, child) => sum + (child.totalCpuCost || 0), 0);
+                const totalCpuCostFromNode = samplesInNode.reduce((sum, s) => sum + s.cpuCost, 0);
+                const totalCpuCost = totalCpuCostFromChildren + totalCpuCostFromNode;
+
+                const maxCpuCostFromChildren = Math.max(0, ...filteredChildren.map(child => child.maxCpuCost || 0));
+                const maxCpuCostFromNode = Math.max(0, ...samplesInNode.map(s => s.cpuCost));
+                const maxCpuCost = Math.max(maxCpuCostFromChildren, maxCpuCostFromNode);
+
+                resultMap.set(entry.node, {
+                    ...entry.node,
+                    children: filteredChildren,
+                    value: value,
+                    samples: samplesInNode,
+                    totalCpuCost: totalCpuCost,
+                    maxCpuCost: maxCpuCost,
+                });
+            }
         }
 
-        const totalCpuCostFromChildren = filteredChildren.reduce((sum, child) => sum + (child.totalCpuCost || 0), 0);
-        const totalCpuCostFromNode = samplesInNode.reduce((sum, s) => sum + s.cpuCost, 0);
-        const totalCpuCost = totalCpuCostFromChildren + totalCpuCostFromNode;
-
-        const maxCpuCostFromChildren = Math.max(0, ...filteredChildren.map(child => child.maxCpuCost || 0));
-        const maxCpuCostFromNode = Math.max(0, ...samplesInNode.map(s => s.cpuCost));
-        const maxCpuCost = Math.max(maxCpuCostFromChildren, maxCpuCostFromNode);
-
-        return {
-            ...node,
-            children: filteredChildren,
-            value: value, // Node's own value, not aggregated
-            samples: samplesInNode,
-            totalCpuCost: totalCpuCost, // Aggregated for tooltip
-            maxCpuCost: maxCpuCost,     // Aggregated for tooltip
-        };
+        return resultMap.get(rootNode) ?? null;
     };
 
     React.useEffect(() => {
         if (!originalData) return;
 
-        let graphData = { name: 'root', value: 0, children: [] };
+        let graphData: FlamegraphNode = { name: 'root', value: 0, children: [] };
 
         if (timeRange) {
             const firstTime = originalData.heatmap.firstTime ?? 0;
             const min = firstTime + timeRange.min;
             const max = firstTime + timeRange.max;
-            
+
             const filtered = filterFlamegraph(originalData.flamegraph, min, max);
             if (filtered) {
                 graphData = filtered;
             }
-            
+
         } else {
             const fullRangeMin = originalData.flamegraph.startTime || 0;
             const fullRangeMax = originalData.flamegraph.endTime || Infinity;
@@ -161,8 +189,8 @@ function App() {
         }
 
         if (filteredData) {
-             return (
-                 <div className="w-full h-full flex flex-col">
+            return (
+                <div className="w-full h-full flex flex-col">
                     <div className="flex-shrink-0 p-2 bg-gray-800/50 rounded-md self-center mb-4">
                         <button onClick={() => setView('flamegraph')} className={`px-4 py-2 text-sm font-medium rounded-md ${view === 'flamegraph' ? 'bg-indigo-600 text-white' : 'text-gray-300 hover:bg-gray-700'}`}>Flame Graph</button>
                         <button onClick={() => setView('heatmap')} className={`px-4 py-2 text-sm font-medium rounded-md ${view === 'heatmap' ? 'bg-indigo-600 text-white' : 'text-gray-300 hover:bg-gray-700'}`}>Heatmap</button>
@@ -171,7 +199,7 @@ function App() {
                         {view === 'flamegraph' ? <FlameGraph data={filteredData.flamegraph} /> : <Heatmap data={originalData!.heatmap} timeRange={timeRange} onTimeRangeSelect={setTimeRange} />}
                     </div>
                 </div>
-             );
+            );
         }
 
         // Default welcome screen
@@ -243,7 +271,7 @@ function App() {
                                 <p className="font-medium text-gray-300">Python:</p>
                                 <p className="text-gray-400 mt-1">Python profiling with <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">perf</code> can be complex. Consider using tools like <a href="https://github.com/benfred/py-spy" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">py-spy</a> which can generate compatible flamegraphs directly.</p>
                             </div>
-                             <div>
+                            <div>
                                 <p className="font-medium text-gray-300">Go:</p>
                                 <p className="text-gray-400 mt-1">Go programs usually provide good symbols by default. Build your application with <code className="bg-gray-700 text-sm rounded px-1.5 py-0.5">go build -toolexec="perf record"</code> or use the built-in pprof tool.</p>
                             </div>
@@ -272,7 +300,7 @@ function App() {
                     </label>
                 </div>
             </header>
-            
+
             <main
                 className="flex-grow flex flex-col items-center justify-center mt-4 border-2 border-dashed border-gray-600 rounded-lg transition-colors"
                 onDrop={handleDrop}
@@ -280,7 +308,7 @@ function App() {
                 onDragEnter={handleDragEnter}
                 onDragLeave={handleDragLeave}
             >
-               <MainContent />
+                <MainContent />
             </main>
         </div>
     );
