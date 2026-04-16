@@ -10,28 +10,65 @@ function parsePerfScript(text: string) {
     const lastCpuCostByCpu = new Map<number, number>();
 
     for (const line of lines) {
-        const match = line.match(/^(\S+)\s+(\d+)\s+\[(\d+)\]\s+([\d.]+):/);
-        if (match) {
-            foundSampleHeader = true;
+        if (!line.trim()) continue;
+
+        // Match sample header: command PID [CPU] TIMESTAMP: COST EVENT:
+        // Example: perf 1764993 [000] 259339.479440:          1 cycles:P:
+        const headerMatch = line.match(/^(\S+)\s+(\d+)\s+\[(\d+)\]\s+([\d.]+):\s+(\d+)\s+(\S+):/);
+        
+        if (headerMatch) {
             if (currentSample) {
                 samples.push(currentSample);
             }
-            const processName = match[1];
-            const cumulativeCpuCost = parseInt(match[2]);
-            const cpu = parseInt(match[3]);
-            const lastCpuCost = lastCpuCostByCpu.get(cpu) || 0;
-            const intervalCpuCost = cumulativeCpuCost - lastCpuCost;
-            lastCpuCostByCpu.set(cpu, cumulativeCpuCost);
+            foundSampleHeader = true;
+            
+            const processName = headerMatch[1];
+            const time = parseFloat(headerMatch[4]);
+            const cpuCost = parseInt(headerMatch[5]);
 
-            currentSample = { stack: [], time: parseFloat(match[4]), process: processName, cpuCost: Math.max(0, intervalCpuCost) };
-        } else if (currentSample && line.trim()) {
-            const frame = line.trim().split(' ')[1];
-            if (frame) {
-                let cleanFrame = frame.split('+')[0];
+            currentSample = { 
+                stack: [], 
+                time: time, 
+                process: processName, 
+                cpuCost: cpuCost 
+            };
+        } else if (currentSample && (line.startsWith('\t') || line.startsWith(' '))) {
+            const trimmed = line.trim();
+            const parts = trimmed.split(/\s+/);
+            
+            let frameName = '';
+            let moduleName = '';
+            
+            if (parts.length >= 2) {
+                // Determine if first part is an address
+                if (/^[0-9a-fA-F]+$/.test(parts[0])) {
+                    frameName = parts[1];
+                    moduleName = parts[2] || '';
+                } else {
+                    frameName = parts[0];
+                    moduleName = parts[1] || '';
+                }
+            } else {
+                frameName = parts[0];
+            }
+            
+            if (frameName) {
+                let cleanFrame = frameName.split('+')[0];
+                if (cleanFrame === '[unknown]' && moduleName) {
+                    // Use module name for context if symbol is unknown
+                    const cleanMod = moduleName.replace(/[()]/g, '');
+                    cleanFrame = `[unknown] (${cleanMod})`;
+                }
+                
                 if (cleanFrame.startsWith('L')) {
                     cleanFrame = cleanFrame.substring(1).replace(/;/g, '.');
                 }
-                currentSample.stack.unshift(cleanFrame);
+                
+                // Aggregate consecutive identical frames (common with [unknown] stacks)
+                // This allows better aggregation of unresolved contexts in the flamegraph.
+                if (currentSample.stack.length === 0 || currentSample.stack[0] !== cleanFrame) {
+                    currentSample.stack.unshift(cleanFrame);
+                }
             }
         }
     }
@@ -60,22 +97,19 @@ function buildFlamegraphData(samples: { stack: string[], time: number, process: 
     for (const sample of samples) {
         let currentNode: FlamegraphNode = root;
 
+        if (sample.stack.length === 0) {
+            root.value++;
+            root.samples = root.samples || [];
+            root.samples.push({ time: sample.time, cpuCost: sample.cpuCost });
+            continue;
+        }
+
         for (let i = 0; i < sample.stack.length; i++) {
             let frameName = sample.stack[i];
             let processName = sample.process;
 
-            if (frameName === '[unknown]') {
-                let unknownCount = 1;
-                while (i + 1 < sample.stack.length && sample.stack[i + 1] === '[unknown]') {
-                    unknownCount++;
-                    i++;
-                }
-
-                if (unknownCount > 1) {
-                    frameName = `${unknownCount} x [unknown] (${processName})`
-                } else {
-                    frameName = `[unknown] (${processName})`
-                }
+            if (frameName.includes('[unknown]')) {
+                // Keep the original name with module context
             }
 
             let childNode = currentNode.children.find((c) => c.name === frameName);
@@ -186,16 +220,42 @@ function buildHeatmapData(samples: { stack: string[], time: number, process: str
     return { data: heatmapData, maxTime: numSeconds, maxCount, firstTime };
 }
 
+// Flatten tree to avoid stack overflow during postMessage serialization
+function flattenFlamegraph(root: FlamegraphNode): any[] {
+    const flat: any[] = [];
+    const stack: { node: FlamegraphNode; parentId: number | null }[] = [{ node: root, parentId: null }];
+    let nextId = 0;
+
+    while (stack.length > 0) {
+        const { node, parentId } = stack.pop()!;
+        const id = nextId++;
+        
+        // Extract node data without children
+        const { children, ...nodeData } = node;
+        flat.push({ ...nodeData, id, parentId });
+
+        // Push children to stack
+        if (children) {
+            for (let i = children.length - 1; i >= 0; i--) {
+                stack.push({ node: children[i], parentId: id });
+            }
+        }
+    }
+    return flat;
+}
+
 self.onmessage = (e: MessageEvent<{ fileContent: string }>) => {
     const { fileContent } = e.data;
     try {
         const samples = parsePerfScript(fileContent);
         const flamegraphData = buildFlamegraphData(samples);
         const heatmapData = buildHeatmapData(samples as any);
-        self.postMessage({ status: 'success', flamegraphData, heatmapData });
+        
+        // Flatten the tree to avoid stack overflow in postMessage structured clone
+        const flatFlamegraph = flattenFlamegraph(flamegraphData);
+        
+        self.postMessage({ status: 'success', flatFlamegraph, heatmapData });
     } catch (error) {
-        // Log the full error for debugging, but only send the message to the main thread
-        console.error("Error parsing perf script:", error);
         self.postMessage({ status: 'error', message: (error as Error).message });
     }
 };

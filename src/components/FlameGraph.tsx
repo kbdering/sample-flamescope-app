@@ -65,13 +65,15 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
         const stackSize = d.depth;
         const processInfo = d.data.process ? `<br>Process: ${d.data.process}` : '';
         const maxCpu = d.data.maxCpuCost ? `<br>Max CPU: ${d.data.maxCpuCost.toLocaleString()}` : '';
-        const avgCpu = d.data.totalCpuCost && d.data.value > 0 ? `<br>Avg CPU: ${(d.data.totalCpuCost / d.data.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
+        const avgCpu = d.data.totalCpuCost && d.value > 0 ? `<br>Avg CPU: ${(d.data.totalCpuCost / d.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '';
+        
         const fullContent = `<strong>${d.data.name}</strong><br>${d.value.toLocaleString()} samples${processInfo}<br>Descendants: ${descendantCount}<br>Stack Size: ${stackSize}${maxCpu}${avgCpu}`;
         setTooltip({ content: fullContent, position: { x: event.pageX, y: event.pageY - 10 } });
+        
         tooltipTimer.current = window.setTimeout(() => {
-            const shortContent = `<strong>${d.data.name}</strong><br>${d.data.value.toLocaleString()} samples${processInfo}`;
+            const shortContent = `<strong>${d.data.name}</strong><br>${d.value.toLocaleString()} samples${processInfo}${maxCpu}${avgCpu}`;
             setTooltip(prev => prev ? { ...prev, content: shortContent } : null);
-        }, 1000);
+        }, 3000); // Increased to 3s to allow reading metrics
     }, []);
 
     const handleMouseOut = () => {
@@ -200,7 +202,7 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
             .on("click", (e, d) => handleClick(e, d as FlamegraphHierarchyNode))
             .on("contextmenu", (e, d) => handleContextMenu(e, d as FlamegraphHierarchyNode));
 
-        cell.filter(d => d.data._collapsed).append('text').attr('x', d => (xScale(d.x1) - xScale(d.x0)) / 2).attr('y', d => (yScale(d.y1) - yScale(d.y0)) / 2).attr('dy', '0.35em').attr('text-anchor', 'middle').style('font-size', '16px').style('font-weight', 'bold').style('pointer-events', 'none').attr('fill', 'white').text('+');
+        ((cell as any).filter(d => d.data._collapsed) as any).append('text').attr('x', d => (xScale(d.x1) - xScale(d.x0)) / 2).attr('y', d => (yScale(d.y1) - yScale(d.y0)) / 2).attr('dy', '0.35em').attr('text-anchor', 'middle').style('font-size', '16px').style('font-weight', 'bold').style('pointer-events', 'none').attr('fill', 'white').text('+');
 
         cell.append("text").attr("x", 4).attr("y", d => Math.max(0, yScale(d.y1) - yScale(d.y0)) - 4).attr("fill", "white").style("font-size", "12px").style("pointer-events", "none").each(function(d) {
             const node = d3.select(this);
@@ -247,15 +249,15 @@ export const FlameGraph: React.FC<FlameGraphProps> = ({ data }) => {
 
                     return (
                         <>
-                            {segmentsToRender.map((seg, i) => (
+                            {segmentsToRender.map((seg: any, i) => (
                                 <span key={seg.type === 'link' ? seg.node.data._path : `ellipsis-${i}`}>
                                     {seg.type === 'ellipsis' ? (
                                         <span className="px-2">...</span>
                                     ) : (
                                         <>
                                             {' > '}
-                                            <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(seg.node as FlamegraphHierarchyNode); }}>
-                                                {(seg.node as FlamegraphHierarchyNode).data.name}
+                                            <a href="#" className="px-2 hover:underline" onClick={(e) => { e.preventDefault(); setZoomTarget(seg.node); }}>
+                                                {seg.node.data.name}
                                             </a>
                                         </>
                                     )}

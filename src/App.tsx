@@ -18,27 +18,65 @@ function App() {
     React.useEffect(() => {
         workerRef.current = new Worker(new URL('./parser.worker.ts', import.meta.url), { type: 'module' });
 
-        workerRef.current.onmessage = (e: MessageEvent<{ status: string, flamegraphData: FlamegraphNode, heatmapData: HeatmapData, message: string }>) => {
+        workerRef.current.onmessage = (e: MessageEvent<{ status: string, flatFlamegraph?: any[], heatmapData: HeatmapData, message: string }>) => {
             setIsLoading(false);
-            const { status, flamegraphData, heatmapData, message } = e.data;
-            if (status === 'success') {
-                // Iterative assignPaths to avoid stack overflow with deep trees
-                const assignPathsStack: { node: FlamegraphNode; parentPath: string }[] = [{ node: flamegraphData, parentPath: '' }];
-                while (assignPathsStack.length > 0) {
-                    const { node, parentPath } = assignPathsStack.pop()!;
-                    node._path = parentPath + '/' + node.name;
-                    for (const child of (node.children || [])) {
-                        assignPathsStack.push({ node: child, parentPath: node._path });
+            const { status, flatFlamegraph, heatmapData, message } = e.data;
+            if (status === 'success' && flatFlamegraph) {
+                // Reconstruct the tree from the flat array to avoid stack overflow during serialization
+                const nodes = new Map<number, FlamegraphNode>();
+                let root: FlamegraphNode | null = null;
+
+                // First pass: create all nodes
+                for (const flatNode of flatFlamegraph) {
+                    const node: FlamegraphNode = {
+                        name: flatNode.name,
+                        value: flatNode.value,
+                        children: [],
+                        process: flatNode.process,
+                        startTime: flatNode.startTime,
+                        endTime: flatNode.endTime,
+                        samples: flatNode.samples,
+                        totalCpuCost: flatNode.totalCpuCost,
+                        maxCpuCost: flatNode.maxCpuCost,
+                    };
+                    nodes.set(flatNode.id, node);
+                    if (flatNode.parentId === null) {
+                        root = node;
                     }
                 }
 
-                setOriginalData({ flamegraph: flamegraphData, heatmap: heatmapData });
-                setError(null);
+                // Second pass: link nodes
+                for (const flatNode of flatFlamegraph) {
+                    if (flatNode.parentId !== null) {
+                        const parent = nodes.get(flatNode.parentId);
+                        const child = nodes.get(flatNode.id);
+                        if (parent && child) {
+                            parent.children.push(child);
+                        }
+                    }
+                }
+
+                if (root) {
+                    // Iterative assignPaths to avoid stack overflow with deep trees
+                    const assignPathsStack: { node: FlamegraphNode; parentPath: string }[] = [{ node: root, parentPath: '' }];
+                    while (assignPathsStack.length > 0) {
+                        const { node, parentPath } = assignPathsStack.pop()!;
+                        node._path = parentPath + '/' + node.name;
+                        for (const child of (node.children || [])) {
+                            assignPathsStack.push({ node: child, parentPath: node._path });
+                        }
+                    }
+
+                    setOriginalData({ flamegraph: root, heatmap: heatmapData });
+                    setError(null);
+                } else {
+                    setError("Failed to reconstruct flamegraph data.");
+                }
             } else {
-                setError(message);
+                setError(message || "Unknown error during parsing");
                 setOriginalData(null);
                 setFilteredData(null);
-                console.error("Parsing error:", message);
+                console.error("[Main] Parsing error:", message);
             }
         };
 
@@ -70,7 +108,10 @@ function App() {
                     .map(child => resultMap.get(child))
                     .filter(Boolean) as FlamegraphNode[];
 
-                const samplesInNode = (entry.node.samples || []).filter(s => s.time >= minTime && s.time <= maxTime);
+                const epsilon = 0.000001;
+                const samplesInNode = (entry.node.samples || []).filter(s => 
+                    s.time >= (minTime - epsilon) && s.time <= (maxTime + epsilon)
+                );
                 const value = samplesInNode.length;
 
                 if (value === 0 && filteredChildren.length === 0) {
@@ -295,6 +336,27 @@ function App() {
                         className="hidden"
                         id="file-upload"
                     />
+                    <button
+                        onClick={async () => {
+                            setIsLoading(true);
+                            setError(null);
+                            setOriginalData(null);
+                            setFilteredData(null);
+                            setTimeRange(null);
+                            try {
+                                const response = await fetch('/sample-flamescope-app/sample.perf');
+                                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                                const content = await response.text();
+                                workerRef.current?.postMessage({ fileContent: content });
+                            } catch (err) {
+                                setError(`Failed to load sample: ${(err as Error).message}`);
+                                setIsLoading(false);
+                            }
+                        }}
+                        className="mr-2 cursor-pointer bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition-colors"
+                    >
+                        Load Sample
+                    </button>
                     <label htmlFor="file-upload" className="cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
                         {originalData ? 'Load New Perf File' : 'Select Perf File'}
                     </label>

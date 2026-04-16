@@ -12,7 +12,7 @@ export const Tooltip: React.FC<TooltipProps> = ({ content, position }) => {
     useLayoutEffect(() => {
         if (position && tooltipRef.current) {
             const { x, y } = position;
-            const { innerWidth, innerHeight } = window;
+            const { innerWidth } = window;
             const { offsetWidth, offsetHeight } = tooltipRef.current;
 
             let newStyle: React.CSSProperties = {
